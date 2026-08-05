@@ -33,11 +33,19 @@ def load_model_class():
     return GShiftNet
 
 
-def pad4(x):
-    h, w = x.shape[-2:]
-    ph = (4 - h % 4) % 4
-    pw = (4 - w % 4) % 4
-    return F.pad(x, (0, pw, 0, ph), mode="reflect")
+def pad_video_to_multiple(x: torch.Tensor, multiple: int = 4):
+    """Pad B,T,C,H,W without calling 2D reflect-pad on a 5D tensor."""
+    if x.ndim != 5:
+        raise ValueError(f"Expected B,T,C,H,W tensor, got {tuple(x.shape)}")
+    b, t, c, h, w = x.shape
+    ph = (multiple - h % multiple) % multiple
+    pw = (multiple - w % multiple) % multiple
+    if ph == 0 and pw == 0:
+        return x
+    mode = "reflect" if h > 1 and w > 1 and ph < h and pw < w else "replicate"
+    flat = x.reshape(b * t, c, h, w)
+    flat = F.pad(flat, (0, pw, 0, ph), mode=mode)
+    return flat.reshape(b, t, c, h + ph, w + pw)
 
 
 def main():
@@ -67,7 +75,7 @@ def main():
             ids = reflection_indices(start - 2, end + 2, n)
             arrays = [load_rgb_float(frames[i]) for i in ids]
             tensor = torch.from_numpy(np.stack(arrays)).permute(0, 3, 1, 2).unsqueeze(0).to(device)
-            tensor = pad4(tensor)
+            tensor = pad_video_to_multiple(tensor, 4)
             if args.fp16:
                 tensor = tensor.half()
             pred = model(tensor)
