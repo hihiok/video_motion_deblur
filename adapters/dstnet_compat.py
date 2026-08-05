@@ -81,6 +81,12 @@ def _install_cupy_import_shim_if_needed() -> bool:
 
     cupy = types.ModuleType("cupy")
 
+    # einops probes optional backends with isinstance(tensor, cupy.ndarray).
+    # A dummy type keeps that probe valid while ensuring Torch tensors are not
+    # mistaken for CuPy arrays.
+    class _FakeCupyArray:
+        pass
+
     class _Util:
         @staticmethod
         def memoize(*args, **kwargs):
@@ -93,6 +99,7 @@ def _install_cupy_import_shim_if_needed() -> bool:
         def compile_with_cache(*args, **kwargs):
             raise RuntimeError("CuPy CUDA kernel requested while CuPy is unavailable")
 
+    cupy.ndarray = _FakeCupyArray
     cupy._util = _Util()
     cupy.cuda = _Cuda()
     sys.modules["cupy"] = cupy
