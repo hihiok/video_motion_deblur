@@ -2,9 +2,9 @@
 """Run official Shift-Net+ checkpoints on an arbitrary frame folder.
 
 The official repository's ``basicsr`` package imports evaluation modules such
-as SciPy/scikit-image at package import time.  Those modules are not needed for
+as SciPy/scikit-image at package import time. Those modules are not needed for
 inference and can fail when NumPy/SciPy wheels in a shared environment are ABI
-incompatible.  This wrapper therefore loads only ``gshift_deblur1.py`` by file
+incompatible. This wrapper therefore loads only ``gshift_deblur1.py`` by file
 path and never executes ``basicsr/__init__.py``.
 """
 from __future__ import annotations
@@ -74,11 +74,11 @@ def pad_video_to_multiple(x: torch.Tensor, multiple: int = 4):
     ph = (multiple - h % multiple) % multiple
     pw = (multiple - w % multiple) % multiple
     if ph == 0 and pw == 0:
-        return x
+        return x.contiguous()
     mode = "reflect" if h > 1 and w > 1 and ph < h and pw < w else "replicate"
     flat = x.reshape(b * t, c, h, w)
     flat = F.pad(flat, (0, pw, 0, ph), mode=mode)
-    return flat.reshape(b, t, c, h + ph, w + pw)
+    return flat.reshape(b, t, c, h + ph, w + pw).contiguous()
 
 
 def main():
@@ -120,7 +120,9 @@ def main():
             if args.fp16:
                 tensor = tensor.half()
 
-            pred = model(tensor)
+            # The official model uses Tensor.view() inside channel_shift(), so
+            # the input must be contiguous on modern PyTorch versions.
+            pred = model(tensor.contiguous())
             if pred.ndim == 5:
                 pred = pred[0]
             if pred.shape[0] == len(ids):
