@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Run official Shift-Net+ deblurring checkpoints on an arbitrary frame folder."""
+"""Run official Shift-Net+ checkpoints on an arbitrary frame folder.
+
+The official repository's ``basicsr`` package imports evaluation modules such
+as SciPy/scikit-image at package import time.  Those modules are not needed for
+inference and can fail when NumPy/SciPy wheels in a shared environment are ABI
+incompatible.  This wrapper therefore loads only ``gshift_deblur1.py`` by file
+path and never executes ``basicsr/__init__.py``.
+"""
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import time
 from pathlib import Path
 
@@ -10,7 +18,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from common import import_repo, inspect_frames, list_frames, load_rgb_float, reflection_indices, save_rgb_float, unwrap_state_dict, write_json
+from common import (
+    inspect_frames,
+    list_frames,
+    load_rgb_float,
+    reflection_indices,
+    save_rgb_float,
+    unwrap_state_dict,
+    write_json,
+)
 
 
 def parse_args():
@@ -25,12 +41,29 @@ def parse_args():
     return p.parse_args()
 
 
-def load_model_class():
-    try:
-        from basicsr.models.archs.gshift_deblur1 import GShiftNet
-    except ImportError:
-        from basicsr.archs.gshift_deblur1 import GShiftNet
-    return GShiftNet
+def load_model_class(repo: str | Path):
+    """Load only the official architecture file, bypassing BasicSR imports."""
+    repo = Path(repo).resolve()
+    candidates = [
+        repo / "basicsr" / "models" / "archs" / "gshift_deblur1.py",
+        repo / "basicsr" / "archs" / "gshift_deblur1.py",
+    ]
+    architecture = next((p for p in candidates if p.is_file()), None)
+    if architecture is None:
+        raise FileNotFoundError(
+            "Could not find official Shift-Net architecture. Checked: "
+            + ", ".join(str(p) for p in candidates)
+        )
+
+    module_name = "shiftnet_official_gshift_deblur1"
+    spec = importlib.util.spec_from_file_location(module_name, architecture)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load architecture module: {architecture}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "GShiftNet"):
+        raise ImportError(f"GShiftNet not found in {architecture}")
+    return module.GShiftNet, architecture
 
 
 def pad_video_to_multiple(x: torch.Tensor, multiple: int = 4):
@@ -50,14 +83,17 @@ def pad_video_to_multiple(x: torch.Tensor, multiple: int = 4):
 
 def main():
     args = parse_args()
-    repo = import_repo(args.repo)
-    GShiftNet = load_model_class()
+    repo = Path(args.repo).resolve()
+    GShiftNet, architecture = load_model_class(repo)
     frames = list_frames(args.input)
     height, width = inspect_frames(frames)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable")
+
     model = GShiftNet(future_frames=2, past_frames=2).to(device).eval()
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     state = unwrap_state_dict(checkpoint)
@@ -74,37 +110,55 @@ def main():
             end = min(start + args.one_len, n)
             ids = reflection_indices(start - 2, end + 2, n)
             arrays = [load_rgb_float(frames[i]) for i in ids]
-            tensor = torch.from_numpy(np.stack(arrays)).permute(0, 3, 1, 2).unsqueeze(0).to(device)
+            tensor = (
+                torch.from_numpy(np.stack(arrays))
+                .permute(0, 3, 1, 2)
+                .unsqueeze(0)
+                .to(device)
+            )
             tensor = pad_video_to_multiple(tensor, 4)
             if args.fp16:
                 tensor = tensor.half()
+
             pred = model(tensor)
-            # Official GShiftNet returns the valid central T-4 frames, normally without batch dim.
             if pred.ndim == 5:
                 pred = pred[0]
             if pred.shape[0] == len(ids):
                 pred = pred[2:-2]
             if pred.shape[0] != end - start:
                 raise RuntimeError(
-                    f"Shift-Net returned {tuple(pred.shape)} for {len(ids)} input frames; expected {end-start} outputs"
+                    f"Shift-Net returned {tuple(pred.shape)} for {len(ids)} input "
+                    f"frames; expected {end-start} outputs"
                 )
-            pred = pred.float().cpu()[:, :, :height, :width].permute(0, 2, 3, 1).numpy()
+
+            pred = (
+                pred.float()
+                .cpu()[:, :, :height, :width]
+                .permute(0, 2, 3, 1)
+                .numpy()
+            )
             for local, idx in enumerate(range(start, end)):
                 save_rgb_float(pred[local], out_dir / frames[idx].name)
             print(f"Shift-Net chunk [{start}, {end})")
 
-    write_json(out_dir.parent / "run_metadata.json", {
-        "model": "Shift-Net+",
-        "repo": str(repo),
-        "checkpoint": str(Path(args.checkpoint).resolve()),
-        "frame_count": n,
-        "width": width,
-        "height": height,
-        "one_len": args.one_len,
-        "fp16": args.fp16,
-        "runtime_seconds": time.time() - started,
-        "torch": torch.__version__,
-    })
+    write_json(
+        out_dir.parent / "run_metadata.json",
+        {
+            "model": "Shift-Net+",
+            "repo": str(repo),
+            "architecture_file": str(architecture),
+            "import_mode": "direct_file_no_basicsr_init",
+            "checkpoint": str(Path(args.checkpoint).resolve()),
+            "frame_count": n,
+            "width": width,
+            "height": height,
+            "one_len": args.one_len,
+            "fp16": args.fp16,
+            "runtime_seconds": time.time() - started,
+            "torch": torch.__version__,
+            "numpy": np.__version__,
+        },
+    )
 
 
 if __name__ == "__main__":
