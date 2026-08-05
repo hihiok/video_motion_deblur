@@ -2,13 +2,14 @@
 """Compatibility loader for DSTNet inference on newer PyTorch environments.
 
 The official DSTNet package eagerly imports all BasicSR modules and its
-IDynamicDWConv uses a CuPy runtime-compiled CUDA kernel.  For inference this
+IDynamicDWConv uses a CuPy runtime-compiled CUDA kernel. For inference this
 module:
 
 1. loads only the architecture modules required by ``deblur_arch.py``;
-2. provides import-only shims for the unused mmcv ConvModule symbol;
-3. uses the official CuPy operator when available;
-4. otherwise replaces only ``_idynamic_cuda`` with an equivalent PyTorch
+2. exposes the minimal ``basicsr.utils`` API required by architecture files;
+3. provides an import-only shim for the unused mmcv ConvModule symbol;
+4. uses the official CuPy operator when available;
+5. otherwise replaces only ``_idynamic_cuda`` with an equivalent PyTorch
    unfold implementation.
 
 The model architecture and checkpoint parameters are unchanged.
@@ -16,6 +17,7 @@ The model architecture and checkpoint parameters are unchanged.
 from __future__ import annotations
 
 import importlib
+import logging
 import sys
 import types
 from pathlib import Path
@@ -31,6 +33,17 @@ def _namespace(name: str, path: Path) -> types.ModuleType:
     module.__path__ = [str(path)]
     sys.modules[name] = module
     return module
+
+
+def _get_root_logger(log_file=None, log_level=logging.INFO, **kwargs):
+    """Minimal inference-only replacement for BasicSR's logger factory."""
+    logger = logging.getLogger("basicsr")
+    logger.setLevel(log_level)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+        logger.addHandler(handler)
+    return logger
 
 
 def _install_mmcv_import_shim() -> None:
@@ -95,13 +108,7 @@ def idynamic_unfold(
     dilation=1,
     group_chunk: int = 8,
 ) -> torch.Tensor:
-    """Inference-equivalent grouped per-pixel dynamic depthwise convolution.
-
-    Official weight layout is ``B,G,Kh,Kw,Hout,Wout``.  Every channel in one
-    group uses the same spatially varying kernel.  Channels are processed in
-    chunks to avoid the very large temporary tensor produced by one full
-    ``unfold`` at HD resolution.
-    """
+    """Inference-equivalent grouped per-pixel dynamic depthwise convolution."""
     if input_tensor.ndim != 4 or weight.ndim != 6:
         raise ValueError(
             f"Expected input BCHW and weight BGKKHW, got {input_tensor.shape}, {weight.shape}"
@@ -157,13 +164,13 @@ def load_dstnet_deblur(repo: str | Path):
     if not (basicsr_root / "archs" / "deblur_arch.py").is_file():
         raise FileNotFoundError(f"DSTNet architecture not found below {repo}")
 
-    # Avoid executing DSTNet's eager basicsr/__init__.py and arch auto-scanner.
     for name in list(sys.modules):
         if name == "basicsr" or name.startswith("basicsr."):
             del sys.modules[name]
     _namespace("basicsr", basicsr_root)
     _namespace("basicsr.archs", basicsr_root / "archs")
-    _namespace("basicsr.utils", basicsr_root / "utils")
+    utils_module = _namespace("basicsr.utils", basicsr_root / "utils")
+    utils_module.get_root_logger = _get_root_logger
 
     _install_mmcv_import_shim()
     used_cupy_shim = _install_cupy_import_shim_if_needed()
