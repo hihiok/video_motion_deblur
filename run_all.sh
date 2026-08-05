@@ -10,16 +10,18 @@ INPUT="${INPUT:-$BENCH/input_frames}"
 GPU="${GPU:-0}"
 MODE="${1:---all}"
 
-# The project already has this Torch 2.4/CUDA 11.8 environment.  The fixed
-# DSTNet and Shift-Net adapters can run there without installing mmcv/CuPy.
 COMMON_ENV="${COMMON_ENV:-turtle_joint_py222}"
 REAL_ENV="${REAL_ENV:-$COMMON_ENV}"
 DST_ENV="${DST_ENV:-$COMMON_ENV}"
 SHIFT_ENV="${SHIFT_ENV:-$COMMON_ENV}"
 BSST_ENV="${BSST_ENV:-bsstnet}"
 
+overall_status=0
 mkdir -p "$BENCH"/{outputs,logs,manifests,videos}
-python3 "$CODE/scripts/prepare_input.py" --source-frames "$INPUT_SRC" --source-mp4 "$INPUT_MP4" --output "$INPUT"
+python3 "$CODE/scripts/prepare_input.py" \
+  --source-frames "$INPUT_SRC" \
+  --source-mp4 "$INPUT_MP4" \
+  --output "$INPUT" || exit 1
 FPS=$(python3 -c "import json; print(json.load(open('$BENCH/manifests/input.json'))['fps'])")
 
 conda_env_exists() {
@@ -31,10 +33,10 @@ run_logged() {
   echo "===== $name ====="
   if "$@" 2>&1 | tee "$BENCH/logs/${name}.log"; then
     echo "$name: complete"
-  else
-    echo "$name: FAILED; see $BENCH/logs/${name}.log" >&2
-    return 1
+    return 0
   fi
+  echo "$name: FAILED; see $BENCH/logs/${name}.log" >&2
+  return 1
 }
 
 run_python_logged() {
@@ -51,6 +53,12 @@ require_file() {
   [[ -s "$1" ]] || { echo "SKIP: missing $1" >&2; return 1; }
 }
 
+fresh_output() {
+  local output="$1"
+  rm -rf "$output"
+  mkdir -p "$output"
+}
+
 if [[ "$MODE" == "--download-only" ]]; then
   ROOT="$ROOT" bash "$CODE/scripts/download_weights.sh"
   exit
@@ -60,12 +68,16 @@ if [[ "$MODE" == "--all" || "$MODE" == "--model=realvdeblur" ]]; then
   if require_file "$BENCH/weights/realvdeblur/realvdeblur_dmd.safetensors" && \
      require_file "$BENCH/weights/realvdeblur/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors" && \
      require_file "$BENCH/weights/realvdeblur/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth"; then
+    out="$BENCH/outputs/realvdeblur_dmd/frames"
+    fresh_output "$out"
     run_python_logged realvdeblur "$REAL_ENV" "$CODE/adapters/realvdeblur_infer.py" \
       --repo "$ROOT/envs/realvdeblur_repo" --input "$INPUT" \
-      --output "$BENCH/outputs/realvdeblur_dmd/frames" \
+      --output "$out" \
       --wan-model-dir "$BENCH/weights/realvdeblur/Wan2.1-T2V-1.3B" \
       --checkpoint "$BENCH/weights/realvdeblur/realvdeblur_dmd.safetensors" \
-      --device cuda:0 --dtype float16 --temporal-window-size 21 || true
+      --device cuda:0 --dtype float16 --temporal-window-size 21 || overall_status=1
+  else
+    overall_status=1
   fi
 fi
 
@@ -73,25 +85,34 @@ if [[ "$MODE" == "--all" || "$MODE" == "--model=dstnet" ]]; then
   for domain in GOPRO DVD BSD; do
     lname=$(echo "$domain" | tr '[:upper:]' '[:lower:]')
     checkpoint="$BENCH/weights/dstnet/${domain}.pth"
-    require_file "$checkpoint" || continue
-    # Float32 is the conservative default for the pure-PyTorch dynamic-conv fallback.
+    if ! require_file "$checkpoint"; then
+      overall_status=1
+      continue
+    fi
+    out="$BENCH/outputs/dstnet_${lname}/frames"
+    fresh_output "$out"
     run_python_logged "dstnet_${lname}" "$DST_ENV" "$CODE/adapters/dstnet_infer.py" \
       --repo "$ROOT/envs/dstnet_repo" --input "$INPUT" \
-      --output "$BENCH/outputs/dstnet_${lname}/frames" \
+      --output "$out" \
       --checkpoint "$checkpoint" \
-      --clip-len 30 --overlap 10 --device cuda:0 || true
+      --clip-len 30 --overlap 10 --device cuda:0 || overall_status=1
   done
 fi
 
 if [[ "$MODE" == "--all" || "$MODE" == "--model=shiftnet" ]]; then
   for domain in gopro dvd; do
     checkpoint="$BENCH/weights/shiftnet/net_${domain}_deblur.pth"
-    require_file "$checkpoint" || continue
+    if ! require_file "$checkpoint"; then
+      overall_status=1
+      continue
+    fi
+    out="$BENCH/outputs/shiftnet_${domain}_plus/frames"
+    fresh_output "$out"
     run_python_logged "shiftnet_${domain}_plus" "$SHIFT_ENV" "$CODE/adapters/shiftnet_infer.py" \
       --repo "$ROOT/envs/shiftnet_repo" --input "$INPUT" \
-      --output "$BENCH/outputs/shiftnet_${domain}_plus/frames" \
+      --output "$out" \
       --checkpoint "$checkpoint" \
-      --one-len 48 --device cuda:0 --fp16 || true
+      --one-len 48 --device cuda:0 --fp16 || overall_status=1
   done
 fi
 
@@ -99,22 +120,35 @@ if [[ "$MODE" == "--all" || "$MODE" == "--model=bsstnet" ]]; then
   for domain in gopro dvd; do
     checkpoint="$BENCH/weights/bsstnet/BSST_${domain}.pth"
     raft="$BENCH/weights/bsstnet/raft-things.pth"
-    require_file "$checkpoint" || continue
-    require_file "$raft" || continue
+    if ! require_file "$checkpoint" || ! require_file "$raft"; then
+      overall_status=1
+      continue
+    fi
+    out="$BENCH/outputs/bsstnet_${domain}/frames"
+    fresh_output "$out"
     run_python_logged "bsstnet_${domain}" "$BSST_ENV" "$CODE/adapters/bsstnet_infer.py" \
       --repo "$ROOT/envs/bsstnet_repo" --input "$INPUT" \
-      --output "$BENCH/outputs/bsstnet_${domain}/frames" \
+      --output "$out" \
       --checkpoint "$checkpoint" --raft-checkpoint "$raft" \
-      --clip-len 48 --temporal-overlap 16 --patch-size 256 --patch-overlap 64 --device cuda:0 || true
+      --clip-len 48 --temporal-overlap 16 \
+      --patch-size 256 --patch-overlap 64 --device cuda:0 || overall_status=1
   done
 fi
 
-# Validate and encode all completed outputs.
 for frames in "$BENCH"/outputs/*/frames; do
   [[ -d "$frames" ]] || continue
   model_dir=$(dirname "$frames")
-  python3 "$CODE/scripts/check_output.py" --input "$INPUT" --output "$frames" --report "$model_dir/check_report.json" || continue
-  python3 "$CODE/scripts/frames_to_video.py" --frames "$frames" --output "$model_dir/output.mp4" --fps "$FPS"
+  if ! find "$frames" -maxdepth 1 -type f | grep -q .; then
+    continue
+  fi
+  if ! python3 "$CODE/scripts/check_output.py" \
+      --input "$INPUT" --output "$frames" --report "$model_dir/check_report.json"; then
+    overall_status=1
+    continue
+  fi
+  python3 "$CODE/scripts/frames_to_video.py" \
+    --frames "$frames" --output "$model_dir/output.mp4" --fps "$FPS" || overall_status=1
 done
 
 echo "Finished. Outputs: $BENCH/outputs"
+exit "$overall_status"
