@@ -65,12 +65,19 @@ def feather_1d(length: int, overlap: int, first: bool, last: bool):
 
 
 def pad_spatial(x: torch.Tensor, minimum: int = 256, multiple: int = 8):
-    h, w = x.shape[-2:]
+    """Pad B,T,C,H,W by applying 2D padding to flattened frames."""
+    if x.ndim != 5:
+        raise ValueError(f"Expected B,T,C,H,W tensor, got {tuple(x.shape)}")
+    b, t, c, h, w = x.shape
     target_h = max(minimum, ((h + multiple - 1) // multiple) * multiple)
     target_w = max(minimum, ((w + multiple - 1) // multiple) * multiple)
     ph, pw = target_h - h, target_w - w
+    if ph == 0 and pw == 0:
+        return x, ph, pw
     mode = "reflect" if h > 1 and w > 1 and ph < h and pw < w else "replicate"
-    return F.pad(x, (0, pw, 0, ph), mode=mode), ph, pw
+    flat = x.reshape(b * t, c, h, w)
+    flat = F.pad(flat, (0, pw, 0, ph), mode=mode)
+    return flat.reshape(b, t, c, target_h, target_w), ph, pw
 
 
 def get_bi_flows(raft, lq):
