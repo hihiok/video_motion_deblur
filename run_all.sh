@@ -117,22 +117,33 @@ if [[ "$MODE" == "--all" || "$MODE" == "--model=shiftnet" ]]; then
 fi
 
 if [[ "$MODE" == "--all" || "$MODE" == "--model=bsstnet" ]]; then
-  for domain in gopro dvd; do
-    checkpoint="$BENCH/weights/bsstnet/BSST_${domain}.pth"
-    raft="$BENCH/weights/bsstnet/raft-things.pth"
-    if ! require_file "$checkpoint" || ! require_file "$raft"; then
-      overall_status=1
-      continue
-    fi
-    out="$BENCH/outputs/bsstnet_${domain}/frames"
-    fresh_output "$out"
-    run_python_logged "bsstnet_${domain}" "$BSST_ENV" "$CODE/adapters/bsstnet_infer.py" \
-      --repo "$ROOT/envs/bsstnet_repo" --input "$INPUT" \
-      --output "$out" \
-      --checkpoint "$checkpoint" --raft-checkpoint "$raft" \
-      --clip-len 48 --temporal-overlap 16 \
-      --patch-size 256 --patch-overlap 64 --device cuda:0 || overall_status=1
-  done
+  # BSSTNet requires its official Torch 1.9.1 + torchvision 0.10.1 stack.
+  # Never fall back to the shared/current Python because torchvision.ops.dcn
+  # must be compiled for the matching Torch/CUDA version.
+  if ! conda_env_exists "$BSST_ENV"; then
+    echo "BSSTNet requires conda env '$BSST_ENV'; refusing current-Python fallback." >&2
+    echo "Create it with the official environment commands in docs/MANUAL_RUNTIME_FIXES.md." >&2
+    overall_status=1
+  else
+    for domain in gopro dvd; do
+      checkpoint="$BENCH/weights/bsstnet/BSST_${domain}.pth"
+      raft="$BENCH/weights/bsstnet/raft-things.pth"
+      if ! require_file "$checkpoint" || ! require_file "$raft"; then
+        overall_status=1
+        continue
+      fi
+      out="$BENCH/outputs/bsstnet_${domain}/frames"
+      fresh_output "$out"
+      run_logged "bsstnet_${domain}" \
+        env CUDA_VISIBLE_DEVICES="$GPU" conda run -n "$BSST_ENV" python \
+        "$CODE/adapters/bsstnet_infer.py" \
+        --repo "$ROOT/envs/bsstnet_repo" --input "$INPUT" \
+        --output "$out" \
+        --checkpoint "$checkpoint" --raft-checkpoint "$raft" \
+        --clip-len 48 --temporal-overlap 16 \
+        --patch-size 256 --patch-overlap 64 --device cuda:0 || overall_status=1
+    done
+  fi
 fi
 
 for frames in "$BENCH"/outputs/*/frames; do
