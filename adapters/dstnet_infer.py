@@ -12,7 +12,6 @@ import torch.nn.functional as F
 
 from common import (
     blend_weights,
-    import_repo,
     inspect_frames,
     list_frames,
     load_rgb_float,
@@ -21,6 +20,7 @@ from common import (
     unwrap_state_dict,
     write_json,
 )
+from dstnet_compat import load_dstnet_deblur
 
 
 def parse_args():
@@ -38,17 +38,29 @@ def parse_args():
     return p.parse_args()
 
 
-def pad_tensor(x: torch.Tensor, multiple: int = 4):
-    h, w = x.shape[-2:]
+def pad_video_tensor(x: torch.Tensor, multiple: int = 4):
+    """Pad B,T,C,H,W by reshaping to 4D first.
+
+    PyTorch reflect padding does not support applying 2D padding directly to a
+    5D tensor in every supported version.
+    """
+    if x.ndim != 5:
+        raise ValueError(f"Expected B,T,C,H,W tensor, got {tuple(x.shape)}")
+    b, t, c, h, w = x.shape
     ph = (multiple - h % multiple) % multiple
     pw = (multiple - w % multiple) % multiple
-    return F.pad(x, (0, pw, 0, ph), mode="reflect"), ph, pw
+    if ph == 0 and pw == 0:
+        return x, ph, pw
+    mode = "reflect" if h > 1 and w > 1 and ph < h and pw < w else "replicate"
+    flat = x.reshape(b * t, c, h, w)
+    flat = F.pad(flat, (0, pw, 0, ph), mode=mode)
+    return flat.reshape(b, t, c, h + ph, w + pw), ph, pw
 
 
 def main():
     args = parse_args()
-    repo = import_repo(args.repo)
-    from basicsr.archs.deblur_arch import Deblur
+    repo = Path(args.repo).resolve()
+    Deblur, dynamic_backend = load_dstnet_deblur(repo)
 
     frames = list_frames(args.input)
     height, width = inspect_frames(frames)
@@ -75,7 +87,7 @@ def main():
         for chunk_id, (start, end) in enumerate(chunks):
             arrays = [load_rgb_float(p) for p in frames[start:end]]
             tensor = torch.from_numpy(np.stack(arrays)).permute(0, 3, 1, 2).unsqueeze(0).to(device)
-            tensor, ph, pw = pad_tensor(tensor, 4)
+            tensor, _, _ = pad_video_tensor(tensor, 4)
             with torch.cuda.amp.autocast(enabled=args.amp and device.type == "cuda"):
                 pred = model(tensor)
             pred = pred[0, :, :, :height, :width].float().cpu().permute(0, 2, 3, 1).numpy()
@@ -85,7 +97,10 @@ def main():
             for j, idx in enumerate(range(start, end)):
                 sums[idx] += pred[j] * local_w[j]
                 weights[idx] += local_w[j]
-            print(f"DSTNet chunk {chunk_id+1}/{len(chunks)}: [{start}, {end})")
+            print(
+                f"DSTNet chunk {chunk_id+1}/{len(chunks)}: [{start}, {end}); "
+                f"dynamic_backend={dynamic_backend}"
+            )
 
     for idx, src in enumerate(frames):
         if weights[idx] <= 0:
@@ -104,6 +119,7 @@ def main():
         "clip_len": args.clip_len,
         "overlap": args.overlap,
         "amp": args.amp,
+        "dynamic_conv_backend": dynamic_backend,
         "runtime_seconds": time.time() - started,
         "torch": torch.__version__,
     })
