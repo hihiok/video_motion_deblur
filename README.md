@@ -1,20 +1,20 @@
 # Video Motion Deblur — Four-Model Business Stream Benchmark
 
-Unified inference wrappers for comparing these official models on the same business video:
+Unified inference wrappers for comparing the following official video-deblurring models on the same business video:
 
 - **RealVDeblur** — `OpenImagingLab/RealVDeblur`
 - **BSSTNet** — `huicongzhang/BSSTNet`
 - **DSTNet** — `xuboming8/DSTNet`
 - **Shift-Net+** — `dasongli1/Shift-Net`
 
-The default test input is:
+Default business input:
 
 ```text
 /mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed
 /mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4
 ```
 
-Existing repositories are expected at:
+Existing repositories:
 
 ```text
 /mnt/ssd1/z00919662/motion_deblur/envs/bsstnet_repo
@@ -22,60 +22,48 @@ Existing repositories are expected at:
 /mnt/ssd1/z00919662/motion_deblur/envs/shiftnet_repo
 ```
 
-RealVDeblur is cloned into:
+RealVDeblur repository:
 
 ```text
 /mnt/ssd1/z00919662/motion_deblur/envs/realvdeblur_repo
 ```
 
-## 1. Download this repository on the server
+## Current recommended workflow
+
+The server already has `turtle_joint_py222` with Torch 2.4/CUDA 11.8. The repository now defaults to cloning that local environment rather than downloading old conda stacks.
 
 ```bash
-cd /mnt/ssd1/z00919662/motion_deblur
-git clone https://github.com/hihiok/video_motion_deblur.git benchmark_code
-cd benchmark_code
-```
+cd /mnt/ssd1/z00919662/motion_deblur/benchmark_code
+git pull
 
-## 2. Prepare repositories and isolated environments
-
-```bash
 ROOT=/mnt/ssd1/z00919662/motion_deblur \
-  bash scripts/setup_repos_and_envs.sh
+SOURCE_ENV=turtle_joint_py222 \
+RUNTIME_ENV=deblur_runtime \
+GPU=0 \
+bash scripts/recover_after_codeagent.sh
 ```
 
-The four projects use incompatible dependency stacks, especially BSSTNet's old `mmcv-full`, so they must remain in separate conda environments.
+This performs a 24-frame smoke test and:
 
-## 3. Download official weights
+- fixes Shift-Net's Torch 2.4 5D reflect-padding issue;
+- runs DSTNet without requiring mmcv;
+- uses the official CuPy dynamic operator when available;
+- otherwise uses an equivalent PyTorch `unfold` inference backend;
+- resumes and verifies the missing Wan2.1 VAE download;
+- skips unavailable models instead of aborting all remaining models.
 
-```bash
-ROOT=/mnt/ssd1/z00919662/motion_deblur \
-  bash scripts/download_weights.sh
-```
-
-Weights are saved under:
+Detailed recovery instructions:
 
 ```text
-/mnt/ssd1/z00919662/motion_deblur/benchmark/weights
+docs/RECOVERY_AFTER_FIRST_RUN.md
 ```
 
-The script downloads:
-
-| Model | Checkpoints |
-|---|---|
-| RealVDeblur | Wan2.1 1.3B model, Wan VAE, RealVDeblur DMD |
-| BSSTNet | GoPro, DVD, RAFT Things |
-| DSTNet | GoPro, DVD, BSD |
-| Shift-Net+ | GoPro Ours+, DVD Ours+ |
-
-All files are SHA256-hashed in `benchmark/manifests/weights.sha256`.
-
-## 4. Run inference
-
-Run all models/checkpoints:
+## Full run after smoke tests pass
 
 ```bash
 ROOT=/mnt/ssd1/z00919662/motion_deblur \
 CODE=$PWD \
+COMMON_ENV=deblur_runtime \
 GPU=0 \
 bash run_all.sh --all
 ```
@@ -89,39 +77,60 @@ bash run_all.sh --model=dstnet
 bash run_all.sh --model=shiftnet
 ```
 
-Outputs are written to:
+`run_all.sh` verifies required checkpoint files and skips only the model whose files are missing.
+
+## Weights
+
+Weights stay on the server under:
 
 ```text
-/mnt/ssd1/z00919662/motion_deblur/benchmark/outputs
+/mnt/ssd1/z00919662/motion_deblur/benchmark/weights
 ```
 
-Each completed run contains:
+Expected files:
+
+| Model | Checkpoints |
+|---|---|
+| RealVDeblur | Wan2.1 diffusion model, `Wan2.1_VAE.pth`, RealVDeblur DMD |
+| BSSTNet | `BSST_gopro.pth`, `BSST_dvd.pth`, `raft-things.pth` |
+| DSTNet | `GOPRO.pth`, `DVD.pth`, `BSD.pth` |
+| Shift-Net+ | `net_gopro_deblur.pth`, `net_dvd_deblur.pth` |
+
+The verified Wan VAE downloader is:
+
+```bash
+ROOT=/mnt/ssd1/z00919662/motion_deblur \
+bash scripts/download_realvdeblur_vae.sh
+```
+
+BSSTNet remains dependent on the authors' official Google Drive folder. Do not substitute an unrelated checkpoint.
+
+## Output structure
 
 ```text
-frames/
-output.mp4
-run_metadata.json
-check_report.json
+/mnt/ssd1/z00919662/motion_deblur/benchmark/outputs/<run>/
+├── frames/
+├── output.mp4
+├── run_metadata.json
+└── check_report.json
 ```
 
 ## Fair-comparison behavior
 
-- All models read the same canonical frame folder.
+- All models read the same canonical decoded frames.
 - Original aspect ratio is preserved.
 - Spatial padding is removed before saving.
 - First and last frames are preserved.
 - DSTNet and BSSTNet use overlapping temporal clips and weighted blending.
 - Shift-Net+ uses reflected two-frame context at each boundary.
-- BSSTNet follows its official 256×256 spatial-patch testing path and official RAFT flow computation.
-- RealVDeblur uses the official `inference.py` with Temporal Window Mask enabled.
-- GoPro/DVD/BSD checkpoints are kept separate because source-domain choice can materially affect business-video behavior.
+- BSSTNet follows its official 256×256 patch testing path and official RAFT flow computation.
+- RealVDeblur calls the official `inference.py` with Temporal Window Mask.
+- GoPro/DVD/BSD checkpoint results remain separate.
 
 ## Important limitations
 
-1. The business video has no sharp GT, so PSNR/SSIM cannot be computed honestly.
-2. RealVDeblur is generative. A sharper-looking result may contain hallucinated details.
-3. The adapters are statically validated here, but the actual CUDA models must be smoke-tested on the target V100/server environment.
-4. BSSTNet depends on an old `mmcv-full` stack. Never replace failed deformable-convolution operators with zero/stub implementations.
-5. Run a short smoke test and inspect RGB order, frame order, borders, temporal seams, NaNs, and identity output before accepting full-sequence results.
-
-See [docs/HANDOFF_CODEAGENT.md](docs/HANDOFF_CODEAGENT.md) for the execution checklist.
+1. The business video has no sharp ground truth, so PSNR/SSIM cannot be computed honestly.
+2. RealVDeblur is generative. Sharper-looking output may include hallucinated details.
+3. The CUDA models must pass the 24-frame smoke gate on the target server before the full sequence starts.
+4. No output should be accepted when frame count, RGB order, borders, temporal order or checkpoint strict-loading checks fail.
+5. Do not describe a broken inference result as domain mismatch.
