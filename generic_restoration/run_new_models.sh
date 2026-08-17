@@ -15,7 +15,7 @@ if [[ "$MODEL" == "all" ]]; then
       status=1
     fi
   done
-  ROOT="${ROOT:-/mnt/ssd1/z00919662/motion_deblur/generic_restoration}"
+  ROOT="${ROOT:-/data/pub1/z00919662/motion_deblur/generic_restoration}"
   CODE="${CODE:-$ROOT/benchmark_code}"
   CANONICAL="$ROOT/canonical"
   FRAME_DIR="$CANONICAL/frames_${MODE}"
@@ -39,10 +39,10 @@ if [[ "$MODEL" != "flashvsr" && "$MODEL" != "seedvr2" && "$MODEL" != "dove" ]]; 
   exit 2
 fi
 
-ROOT="${ROOT:-/mnt/ssd1/z00919662/motion_deblur/generic_restoration}"
+ROOT="${ROOT:-/data/pub1/z00919662/motion_deblur/generic_restoration}"
 CODE="${CODE:-$ROOT/benchmark_code}"
-CONDA_BASE="${CONDA_BASE:-/mnt/ssd1/z00919662/anaconda3}"
-INPUT_VIDEO="${INPUT_VIDEO:-/mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4}"
+CONDA_BASE="${CONDA_BASE:-/data/pub1/z00919662/anaconda3}"
+INPUT_VIDEO="${INPUT_VIDEO:-/data/pub1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4}"
 GPU="${GPU:-0}"
 CANONICAL="$ROOT/canonical"
 RUN_DIR="$ROOT/runs/${MODEL}_${MODE}"

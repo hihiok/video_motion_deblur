@@ -36,9 +36,10 @@ Do not display proxy variables. If the private proxy activation file is missing 
 ## Fixed locations
 
 ```text
-Project root: /mnt/ssd1/z00919662/motion_deblur/generic_restoration
-Benchmark code: /mnt/ssd1/z00919662/motion_deblur/generic_restoration/benchmark_code
-Default input: /mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4
+Project root: /data/pub1/z00919662/motion_deblur/generic_restoration
+Benchmark code: /data/pub1/z00919662/motion_deblur/generic_restoration/benchmark_code
+Default input: /data/pub1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4
+Conda base: /data/pub1/z00919662/anaconda3
 Blackwell source env: StereoPilot
 GPU: RTX PRO 6000 Blackwell, compute capability 12.0
 ```
@@ -55,7 +56,7 @@ dove_blackwell
 
 ```bash
 set -euo pipefail
-ROOT=/mnt/ssd1/z00919662/motion_deblur/generic_restoration
+ROOT=/data/pub1/z00919662/motion_deblur/generic_restoration
 mkdir -p "$ROOT"
 cd "$ROOT"
 
@@ -76,9 +77,9 @@ Stop if the benchmark checkout contains unrelated local changes.
 ## Phase 2: set up all three models
 
 ```bash
-cd /mnt/ssd1/z00919662/motion_deblur/generic_restoration/benchmark_code
+cd /data/pub1/z00919662/motion_deblur/generic_restoration/benchmark_code
 
-ROOT=/mnt/ssd1/z00919662/motion_deblur/generic_restoration \
+ROOT=/data/pub1/z00919662/motion_deblur/generic_restoration \
 CODE=$PWD \
 BLACKWELL_SOURCE_ENV=StereoPilot \
 CUDA_VISIBLE_DEVICES=0 \
@@ -98,7 +99,7 @@ DOVE_SETUP_PASS
 Manual action may be required for DOVE: if Google Drive fails through the proxy, download the official Stage-2 Final archive from the DOVE repository link and copy it to:
 
 ```text
-/mnt/ssd1/z00919662/motion_deblur/generic_restoration/weights/DOVE_Final/dove_final_download
+/data/pub1/z00919662/motion_deblur/generic_restoration/weights/DOVE_Final/dove_final_download
 ```
 
 Then rerun only:
@@ -112,11 +113,11 @@ FlashVSR's block-sparse CUDA extension is compiled from the pinned upstream comm
 ## Phase 3: 25-frame smoke inference
 
 ```bash
-cd /mnt/ssd1/z00919662/motion_deblur/generic_restoration/benchmark_code
+cd /data/pub1/z00919662/motion_deblur/generic_restoration/benchmark_code
 
-ROOT=/mnt/ssd1/z00919662/motion_deblur/generic_restoration \
+ROOT=/data/pub1/z00919662/motion_deblur/generic_restoration \
 CODE=$PWD \
-INPUT_VIDEO=/mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4 \
+INPUT_VIDEO=/data/pub1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4 \
 GPU=0 \
 bash generic_restoration/run_new_models.sh smoke all
 ```
@@ -146,7 +147,7 @@ Combined preview path
 Combined preview:
 
 ```text
-/mnt/ssd1/z00919662/motion_deblur/generic_restoration/runs/new_models_smoke_combined_preview.jpg
+/data/pub1/z00919662/motion_deblur/generic_restoration/runs/new_models_smoke_combined_preview.jpg
 ```
 
 The user must manually compare frame 0, middle, and last for faces, subtitles, logos, thin lines, color, hallucinated texture, ringing, borders, residual blur, and temporal consistency.
@@ -156,13 +157,13 @@ The user must manually compare frame 0, middle, and last for faces, subtitles, l
 Do not create the marker until the user explicitly approves the combined smoke preview.
 
 ```bash
-ROOT=/mnt/ssd1/z00919662/motion_deblur/generic_restoration
+ROOT=/data/pub1/z00919662/motion_deblur/generic_restoration
 touch "$ROOT/APPROVE_NEW_MODELS_FULL"
 
 cd "$ROOT/benchmark_code"
 ROOT="$ROOT" \
 CODE=$PWD \
-INPUT_VIDEO=/mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4 \
+INPUT_VIDEO=/data/pub1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4 \
 GPU=0 \
 bash generic_restoration/run_new_models.sh full all
 ```

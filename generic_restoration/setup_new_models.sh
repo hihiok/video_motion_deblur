@@ -19,9 +19,9 @@ fi
 
 # Proxy credentials are supplied by the private source conda environment.
 # This repository deliberately contains no authenticated proxy URL.
-ROOT="${ROOT:-/mnt/ssd1/z00919662/motion_deblur/generic_restoration}"
+ROOT="${ROOT:-/data/pub1/z00919662/motion_deblur/generic_restoration}"
 CODE="${CODE:-$ROOT/benchmark_code}"
-CONDA_BASE="${CONDA_BASE:-/mnt/ssd1/z00919662/anaconda3}"
+CONDA_BASE="${CONDA_BASE:-/data/pub1/z00919662/anaconda3}"
 SOURCE_ENV="${BLACKWELL_SOURCE_ENV:-StereoPilot}"
 FLASH_REPO="$ROOT/envs/FlashVSR"
 SEED_REPO="$ROOT/envs/SeedVR"
