@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -43,7 +42,6 @@ def pad_to_multiple(x: torch.Tensor, multiple: int = 16):
     pad_w = (multiple - w % multiple) % multiple
     if pad_h == 0 and pad_w == 0:
         return x, (h, w)
-    # Right/bottom-only padding keeps the original image coordinates unchanged.
     mode = "reflect" if h > pad_h and w > pad_w else "replicate"
     return F.pad(x, (0, pad_w, 0, pad_h), mode=mode), (h, w)
 
@@ -55,13 +53,15 @@ def tensor_from_bgr(frame: np.ndarray, device: torch.device) -> torch.Tensor:
 
 
 def bgr_from_tensor(x: torch.Tensor, h: int, w: int) -> np.ndarray:
-    x = x[..., :h, :w].detach().float().clamp_(0, 1)[0]
-    rgb = x.mul_(255.0).round_().byte().permute(1, 2, 0).cpu().numpy()
+    # Model output is created inside torch.inference_mode().  Clone it before
+    # post-processing so PyTorch 2.x does not reject mutations on an inference
+    # tensor outside inference_mode.  Also keep post-processing out-of-place.
+    x = x[..., :h, :w].detach().clone().float().clamp(0.0, 1.0)[0]
+    rgb = (x * 255.0).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
 def ffmpeg_encode(frames_dir: Path, input_video: Path, output_video: Path, fps: float):
-    # Loss-light H.264 encode, copying original audio when present.
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
         "-framerate", f"{fps:.12g}",
@@ -114,7 +114,10 @@ def main():
     from model.rt_focuser_model import RT_Focuser_Standard  # noqa: E402
 
     model = RT_Focuser_Standard().to(device)
-    state = torch.load(str(checkpoint), map_location="cpu")
+    try:
+        state = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
+    except TypeError:
+        state = torch.load(str(checkpoint), map_location="cpu")
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     model.load_state_dict(state, strict=True)
@@ -141,7 +144,6 @@ def main():
     processed = 0
     infer_seconds = 0.0
 
-    # autocast API differs slightly across torch versions; use a no-op on CPU.
     amp_ctx = (
         lambda: torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.fp16)
         if device.type == "cuda"
@@ -185,8 +187,8 @@ def main():
 
     if first_input is not None and first_output is not None:
         preview = np.concatenate([first_input, first_output], axis=1)
-        cv2.putText(preview, "Input", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3, cv2.LINE_AA)
-        cv2.putText(preview, "RT-Focuser", (width + 20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3, cv2.LINE_AA)
+        cv2.putText(preview, "Input", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA)
+        cv2.putText(preview, "RT-Focuser", (width + 20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA)
         cv2.imwrite(str(output_dir / "preview_input_output.jpg"), preview)
 
     output_video = output_dir / "rt_focuser_output.mp4"
