@@ -12,15 +12,20 @@
 
 ## 1. 代理、SSL 与拉取代码
 
-代理凭据已在 conda 激活脚本中，严禁打印或提交明文。
+按服务器网络要求设置代理，并在 Git 操作前关闭 SSL verify：
 
 ```bash
 set +x
-source /mnt/ssd1/z00919662/anaconda3/bin/activate RVRT
-source "$CONDA_PREFIX/etc/conda/activate.d/proxy_env.sh"
-git config --global http.proxy "$http_proxy"
-git config --global https.proxy "$https_proxy"
+export http_proxy="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+export https_proxy="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+export https_proxy="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+export HTTPS_PROXY="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+git config --global http.proxy http://z00919662:Zzhs12345%21@proxy.server.com:8080
+git config --global https.proxy http://z00919662:Zzhs12345%21@proxy.server.com:8080
+git config --global https.proxy https://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080
+git config --global http.proxy http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080
 git config --global http.sslVerify false
+source /mnt/ssd1/z00919662/anaconda3/bin/activate RVRT
 
 cd /mnt/ssd1/z00919662/motion_deblur
 if [ ! -d video_motion_deblur/.git ]; then
