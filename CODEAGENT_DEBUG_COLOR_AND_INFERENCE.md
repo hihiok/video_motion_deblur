@@ -17,15 +17,20 @@
 
 ## 0. 网络代理、SSL 与代码同步
 
-代理凭据已经由管理员写入 conda 激活脚本。不得打印、复制或提交代理明文。
+按服务器网络要求设置代理，并在 Git 操作前关闭 SSL verify：
 
 ```bash
 set +x
-source /mnt/ssd1/z00919662/anaconda3/bin/activate RVRT
-source "$CONDA_PREFIX/etc/conda/activate.d/proxy_env.sh"
-git config --global http.proxy "$http_proxy"
-git config --global https.proxy "$https_proxy"
+export http_proxy="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+export https_proxy="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+export https_proxy="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+export HTTPS_PROXY="http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080"
+git config --global http.proxy http://z00919662:Zzhs12345%21@proxy.server.com:8080
+git config --global https.proxy http://z00919662:Zzhs12345%21@proxy.server.com:8080
+git config --global https.proxy https://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080
+git config --global http.proxy http://z00919662:Zzhs12345%21@proxyhk.huawei.com:8080
 git config --global http.sslVerify false
+source /mnt/ssd1/z00919662/anaconda3/bin/activate RVRT
 ```
 
 获取我提供的分支（若目录已存在就 fetch/reset 到该远端分支；不要改动模型官方 repo）：
