@@ -1,5 +1,7 @@
 # CodeAgent 指令：修复偏蓝与纹理噪音，并重跑 Shift-Net Ours-s / ESTRNN BSD 3ms-24ms
 
+> **已被最新用户决定取代：不要再运行 ESTRNN。** 本文仅保留为历史双模型诊断记录。当前执行入口是 `CODEAGENT_RUN_SHIFTNET_OURS_S_FULL.md`，只运行 Shift-Net Ours-s。
+
 ## 执行授权（必须遵守）
 
 用户已授权你在本任务定义的 benchmark 范围内执行本文全部 command，不需要、也不要向用户索要 manual approval。不要在 smoke test 后输出 `WAITING_FOR_USER_CONFIRMATION`，不要要求用户回复 `CONTINUE_*`。硬性检查通过后自动继续全量推理；硬性检查失败时停止后续推理并报告证据，这属于校验失败，不是等待人工授权。授权不包括删除任务目录之外的数据、覆盖旧结果、修改官方模型仓库或泄露凭据。
