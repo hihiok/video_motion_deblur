@@ -1,5 +1,14 @@
 # Video Motion Deblur — Four-Model Business Stream Benchmark
 
+## New: generic mixed-degradation restoration benchmark
+
+The `generic_restoration/` package adds a same-business-stream, source-resolution comparison of:
+
+- RealViformer on the old V100 server;
+- FlashVSR v1.1, SeedVR2-3B, and DOVE Final on the RTX PRO 6000 Blackwell server.
+
+It includes pinned official repositories, separate environments, canonical MP4 decoding, source SHA256 checks across servers, exact frame-count validation, original timing/audio remuxing, Blackwell build paths, and mandatory 25-frame manual smoke gates. Start with [`generic_restoration/README.md`](generic_restoration/README.md) and the two CodeAgent instruction files in that directory.
+
 Unified inference wrappers for comparing the following official video-deblurring models on the same business video:
 
 - **RealVDeblur** — `OpenImagingLab/RealVDeblur`
