@@ -11,6 +11,7 @@ def _find_pair_roots(root: Path, split: str):
     candidates = [
         (root / split / 'blur', root / split / 'sharp'),
         (root / split / 'blur', root / split / 'GT'),
+        (root / split / 'blur', root / split / 'gt'),
         (root / split / 'blur_gamma', root / split / 'sharp'),
         (root / split / 'input', root / split / 'target'),
     ]
