@@ -9,8 +9,8 @@ from torch.utils.data import ConcatDataset, Dataset, WeightedRandomSampler
 import torchvision.transforms.functional as TF
 
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp'}
-_BLUR_NAMES = ('blur', 'blurry', 'input')
-_GT_NAMES = ('sharp', 'gt', 'GT', 'target', 'label')
+_BLUR_NAMES = ('blur', 'Blur', 'blurry', 'input')
+_GT_NAMES = ('sharp', 'Sharp', 'gt', 'GT', 'target', 'label')
 
 
 def _natural_key(path_or_name):
@@ -37,9 +37,9 @@ def _candidate_bases(root: Path, split: str):
         if p.is_dir():
             bases.append(p)
 
-    # Datasets such as BSD may have configuration folders above train/test,
-    # e.g. BSD/1ms8ms/train/{blur,gt}.
-    for child in sorted([p for p in root.iterdir() if p.is_dir()], key=_natural_key) if root.is_dir() else []:
+    # Datasets such as BSD often have exposure/configuration folders above train/test,
+    # e.g. BSD/BSD_1ms8ms/train/<seq>/Blur/RGB.
+    for child in (sorted([p for p in root.iterdir() if p.is_dir()], key=_natural_key) if root.is_dir() else []):
         for a in aliases:
             p = child / a
             if p.is_dir():
@@ -49,12 +49,11 @@ def _candidate_bases(root: Path, split: str):
     explicit_split_present = any((root / x).is_dir() for x in ('train', 'training', 'test', 'testing', 'val', 'validation'))
     if not explicit_split_present:
         bases.append(root)
-        for child in sorted([p for p in root.iterdir() if p.is_dir()], key=_natural_key) if root.is_dir() else []:
+        for child in (sorted([p for p in root.iterdir() if p.is_dir()], key=_natural_key) if root.is_dir() else []):
             child_has_split = any((child / x).is_dir() for x in ('train', 'training', 'test', 'testing', 'val', 'validation'))
             if not child_has_split:
                 bases.append(child)
 
-    # Deduplicate while preserving order.
     out, seen = [], set()
     for p in bases:
         rp = p.resolve()
@@ -64,22 +63,32 @@ def _candidate_bases(root: Path, split: str):
     return out
 
 
+def _add_pair(pairs, seen, blur, gt):
+    if not (blur.is_dir() and gt.is_dir()):
+        return
+    key = (blur.resolve(), gt.resolve())
+    if key not in seen:
+        seen.add(key)
+        pairs.append((blur, gt))
+
+
 def discover_pair_roots(root, split='train'):
-    """Discover one or more blur/GT directory pairs without modifying the dataset.
+    """Discover one or more frame-aligned blur/GT directory pairs.
 
     Supported examples include:
       root/train/blur + root/train/gt
       root/blur + root/gt
-      root/<config>/train/blur + root/<config>/gt   (common BSD packaging)
-      input/target and blur/sharp variants
+      root/<config>/train/blur + root/<config>/gt
+      root/<config>/train/<seq>/Blur/RGB + .../Sharp/RGB  (official BSD)
+      input/target and blur/sharp naming variants
     """
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f'Dataset root does not exist: {root}')
 
-    pairs = []
-    seen = set()
+    pairs, seen = [], set()
     for base in _candidate_bases(root, split):
+        # Standard GOPRO/DVD-style layout: base/{blur,gt}/<sequence>/frames.
         for blur_name in _BLUR_NAMES:
             blur = base / blur_name
             if not blur.is_dir():
@@ -87,11 +96,26 @@ def discover_pair_roots(root, split='train'):
             for gt_name in _GT_NAMES:
                 gt = base / gt_name
                 if gt.is_dir():
-                    key = (blur.resolve(), gt.resolve())
-                    if key not in seen:
-                        seen.add(key)
-                        pairs.append((blur, gt))
+                    _add_pair(pairs, seen, blur, gt)
                     break
+
+        # Official ESTRNN BSD layout:
+        # base/<sequence>/Blur/RGB/*.png and base/<sequence>/Sharp/RGB/*.png
+        for seq in (sorted([p for p in base.iterdir() if p.is_dir()], key=_natural_key) if base.is_dir() else []):
+            for blur_name in ('Blur', 'blur'):
+                blur_container = seq / blur_name
+                if not blur_container.is_dir():
+                    continue
+                blur = blur_container / 'RGB' if (blur_container / 'RGB').is_dir() else blur_container
+                for gt_name in ('Sharp', 'sharp', 'GT', 'gt'):
+                    gt_container = seq / gt_name
+                    if not gt_container.is_dir():
+                        continue
+                    gt = gt_container / 'RGB' if (gt_container / 'RGB').is_dir() else gt_container
+                    if _image_files(blur) and _image_files(gt):
+                        _add_pair(pairs, seen, blur, gt)
+                        break
+
     return pairs
 
 
@@ -111,8 +135,6 @@ def _match_frame_pairs(blur_dir: Path, gt_dir: Path):
     if len(exact) == len(blur_files) == len(gt_files):
         return exact
 
-    # Fail safe: do not silently pair differently named frames by index.
-    # Motion-deblur supervision must be frame aligned.
     raise RuntimeError(
         f'Frame-name mismatch: blur={blur_dir} ({len(blur_files)} files), '
         f'gt={gt_dir} ({len(gt_files)} files), exact_name_pairs={len(exact)}. '
@@ -178,8 +200,8 @@ class VideoPairWindowDataset(Dataset):
             blur = [im.crop(box) for im in blur]
             gt = [im.crop(box) for im in gt]
 
-            # Match NanoVSR's geometry augmentation: horizontal/vertical flip,
-            # temporal reversal, and optional 90/180/270-degree rotation.
+            # NanoVSR-style geometric augmentation only. CutBlur is deliberately
+            # omitted because it is an SR-specific degradation augmentation.
             if random.random() < 0.5:
                 blur = [TF.hflip(im) for im in blur]
                 gt = [TF.hflip(im) for im in gt]
@@ -205,8 +227,8 @@ class VideoPairWindowDataset(Dataset):
 def build_mixed_dataset(source_roots, split, num_frames, patch_size=None, train=True):
     """Build a family-balanced mixture.
 
-    source_roots: dict like {'GoPro': '/path', 'DVD': '/path', 'BSD': '/path'}.
-    Each family receives equal sampling probability regardless of raw window count.
+    Each family (GoPro/DVD/BSD) receives equal total sampling weight, so BSD's
+    multiple exposure configurations cannot dominate merely by having more windows.
     """
     components = []
     family_lengths = defaultdict(int)
@@ -240,9 +262,7 @@ def build_mixed_dataset(source_roots, split, num_frames, patch_size=None, train=
     sampler = None
     if train:
         weights = []
-        families = sorted(family_lengths)
         for ds in components:
-            # Sum of weights per family is equal; WeightedRandomSampler normalizes them.
             per_sample = 1.0 / max(1, family_lengths[ds.family])
             weights.extend([per_sample] * len(ds))
         sampler = WeightedRandomSampler(
