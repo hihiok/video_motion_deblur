@@ -23,7 +23,7 @@ Branch:
 Required code commit (the checked-out HEAD may be a later documentation-only
 commit, but this commit must be its ancestor):
 
-`6b84af725126b9ebdbcb644e7588bcb0a21f52d1`
+`254af1898fa8374a1d7de27e1c7d9abb5cb28d3e`
 
 Primary files:
 
@@ -101,15 +101,18 @@ ablation task.
 ```bash
 GOPRO=/mnt/ssd1/z00919662/motion_deblur/datasets/GoPro
 DVD=/mnt/ssd1/z00919662/motion_deblur/datasets/DVD
-BSD=/mnt/ssd1/z00919662/datasets/BSD
+BSD=/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms
 ```
 
 BSD hard policy:
 
-- Training may read only `/mnt/ssd1/z00919662/datasets/BSD/train`.
-- Audit/evaluation may read only `/mnt/ssd1/z00919662/datasets/BSD/test`.
-- Do not discover or sample `BSD/<configuration>/train` or
-  `BSD/<configuration>/test`.
+- The BSD root must be exactly
+  `/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms`.
+- Training may read only
+  `/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms/train`.
+- Audit/evaluation may read only
+  `/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms/test`.
+- Do not discover or sample any sibling BSD exposure/configuration directory.
 - Do not copy, rename, relabel, regenerate, or modify dataset files.
 
 GoPro/DVD/BSD training uses family-balanced sampling, approximately `1:1:1`.
@@ -169,11 +172,11 @@ ROOT=/mnt/ssd1/z00919662/motion_deblur
 REPO=$ROOT/video_motion_deblur_nanovnr_waveshift_pagf
 RUN=$ROOT/runs/nanovnr_waveshift_pagf_fullframe_20260904
 BRANCH=agent/nanovnr-waveshift-pagf-fullframe-20260904
-EXPECTED_CODE_COMMIT=6b84af725126b9ebdbcb644e7588bcb0a21f52d1
+EXPECTED_CODE_COMMIT=254af1898fa8374a1d7de27e1c7d9abb5cb28d3e
 INPUT=$ROOT/input/xiaobieli38_trimmed.mp4
 GOPRO=$ROOT/datasets/GoPro
 DVD=$ROOT/datasets/DVD
-BSD=/mnt/ssd1/z00919662/datasets/BSD
+BSD=/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms
 
 mkdir -p "$ROOT" "$RUN"
 cd "$ROOT"
@@ -296,7 +299,7 @@ outside `$BSD/test`, is an immediate stop:
 
 ```text
 HUMAN_ACTION_REQUIRED: YES
-REASON: BSD_SPLIT_POLICY_VIOLATION
+REASON: BSD_3MS24MS_ROOT_OR_SPLIT_POLICY_VIOLATION
 BAD_PATH: <path>
 ```
 
@@ -415,7 +418,7 @@ python train_nanovnr_waveshift_pagf_fullframe.py \
 Expected:
 
 ```text
-RECIPE_ID=nanovnr_waveshift_pagf_edge_native_fullframe_bsd_v1
+RECIPE_ID=nanovnr_waveshift_pagf_edge_native_fullframe_bsd3ms24ms_v2
 ARCHITECTURE=NanoVNRWaveShiftPAGF
 VARIANT=waveshift_edge
 ```
@@ -507,6 +510,7 @@ comparable only when its checkpoint says:
 ```text
 architecture=NanoVNRNAFNetRGB
 recipe_id=nanovnr_nafnet_rgb_native_fullframe_mix_bsd_train_test_v2
+args.bsd_root=/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms
 ```
 
 If comparable 50k/75k/100k/125k/150k baseline checkpoints exist, evaluate them
@@ -626,7 +630,7 @@ SOURCE_CODE_MODIFIED_BY_CODEAGENT: NO
 
 ARCHITECTURE: NanoVNRWaveShiftPAGF
 VARIANT: waveshift_edge
-RECIPE_ID: nanovnr_waveshift_pagf_edge_native_fullframe_bsd_v1
+RECIPE_ID: nanovnr_waveshift_pagf_edge_native_fullframe_bsd3ms24ms_v2
 MODEL_CONFIG: <dict>
 UNIT_TESTS: PASS / FAIL
 HAAR_ROUNDTRIP_MAX_ABS_DIFF: <value>
