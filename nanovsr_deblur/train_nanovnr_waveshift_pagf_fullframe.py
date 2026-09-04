@@ -12,10 +12,11 @@ from models.network_nanovnr_waveshift_pagf import NanoVNRWaveShiftPAGF
 
 
 ARCHITECTURE = 'NanoVNRWaveShiftPAGF'
+EXPECTED_BSD_ROOT = Path('/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms')
 RECIPE_IDS = {
-    'haar_pagf': 'nanovnr_haar_pagf_native_fullframe_bsd_v1',
-    'waveshift': 'nanovnr_waveshift_pagf_native_fullframe_bsd_v1',
-    'waveshift_edge': 'nanovnr_waveshift_pagf_edge_native_fullframe_bsd_v1',
+    'haar_pagf': 'nanovnr_haar_pagf_native_fullframe_bsd3ms24ms_v2',
+    'waveshift': 'nanovnr_waveshift_pagf_native_fullframe_bsd3ms24ms_v2',
+    'waveshift_edge': 'nanovnr_waveshift_pagf_edge_native_fullframe_bsd3ms24ms_v2',
 }
 
 
@@ -42,6 +43,21 @@ def build_model(variant, grad_checkpoint=False):
             grad_checkpoint=grad_checkpoint,
         )
     raise ValueError(f'Unknown variant: {variant}')
+
+
+def validate_bsd_root(root):
+    """Lock this experiment to the single requested BSD 3ms-24ms tree."""
+    actual = Path(root).expanduser().resolve()
+    expected = EXPECTED_BSD_ROOT.resolve()
+    if actual != expected:
+        raise RuntimeError(
+            f'BSD_ROOT_POLICY_VIOLATION: expected exactly {expected}, got {actual}'
+        )
+    for split in ('train', 'test'):
+        split_root = actual / split
+        if not split_root.is_dir():
+            raise RuntimeError(f'Missing required BSD split: {split_root}')
+    return str(actual)
 
 
 def save_checkpoint(path, model, optimizer, scheduler, step, args, phase):
@@ -194,6 +210,7 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA GPU is required.')
     device = torch.device('cuda')
+    args.bsd_root = validate_bsd_root(args.bsd_root)
     roots = common.roots_from_args(args)
     recipe_id = RECIPE_IDS[args.variant]
     probe = build_model(args.variant, grad_checkpoint=False)
@@ -204,7 +221,8 @@ def main():
     print('MODEL_CONFIG=' + json.dumps(probe.config_dict()), flush=True)
     print('INPUT_CHANNELS=3 RGB', flush=True)
     print('FULL_FRAME=YES RANDOM_CROP=NO RESIZE=NO BATCH=1', flush=True)
-    print('BSD_POLICY=STRICT_DIRECT_TRAIN_TEST_ONLY', flush=True)
+    print('BSD_POLICY=STRICT_BSD_3MS24MS_DIRECT_TRAIN_TEST_ONLY', flush=True)
+    print('BSD_ROOT=' + args.bsd_root, flush=True)
     print(
         f'TRAIN shortT={args.short_frames} longT={args.long_frames} '
         f'switch={args.switch_iter} total={args.total_iterations}',
