@@ -170,7 +170,7 @@ source "$CONDA_PREFIX/etc/conda/activate.d/proxy_env.sh" 2>/dev/null || true
 
 ROOT=/mnt/ssd1/z00919662/motion_deblur
 REPO=$ROOT/video_motion_deblur_nanovnr_waveshift_pagf
-RUN=$ROOT/runs/nanovnr_waveshift_pagf_fullframe_20260904
+RUN=$ROOT/runs/nanovnr_waveshift_pagf_fullframe_bsd3ms24ms_20260904
 BRANCH=agent/nanovnr-waveshift-pagf-fullframe-20260904
 EXPECTED_CODE_COMMIT=254af1898fa8374a1d7de27e1c7d9abb5cb28d3e
 INPUT=$ROOT/input/xiaobieli38_trimmed.mp4
