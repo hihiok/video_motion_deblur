@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class ChannelRowLayerNorm(nn.Module):
@@ -32,12 +33,10 @@ class NAFBlockLayerNormCRandWithoutSCA(nn.Module):
         self.conv2 = nn.Conv2d(c, dw_channel, 3, 1, 1, bias=True)
         self.prelu1 = nn.PReLU(dw_channel)
         self.conv3 = nn.Conv2d(dw_channel, c, 1, 1, 0, bias=True)
-
         ffn_channel = FFN_Expand * c
         self.conv4 = nn.Conv2d(c, ffn_channel, 1, 1, 0, bias=True)
         self.prelu2 = nn.PReLU(ffn_channel)
         self.conv5 = nn.Conv2d(ffn_channel, c, 1, 1, 0, bias=True)
-
         self.norm1 = ChannelRowLayerNorm(c)
         self.norm2 = ChannelRowLayerNorm(c)
         self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
@@ -49,7 +48,6 @@ class NAFBlockLayerNormCRandWithoutSCA(nn.Module):
         x = self.prelu1(x)
         x = self.conv3(x)
         y = inp + x * self.beta
-
         x = self.conv4(self.norm2(y))
         x = self.prelu2(x)
         x = self.conv5(x)
@@ -57,14 +55,6 @@ class NAFBlockLayerNormCRandWithoutSCA(nn.Module):
 
 
 class NAFUNetPropagationDefineChannel(nn.Module):
-    """Exact propagation U-Net from the supplied model.
-
-    cur_feat/prop_feat: [B, 12, H, W]
-    concat input:       [B, 24, H, W]
-    channels:           24 -> 32 -> 48 -> 72 -> 48 -> 32 -> 24 -> 12
-    hidden output:      [B, 12, H, W]
-    """
-
     def __init__(
         self,
         width=12,
@@ -78,76 +68,38 @@ class NAFUNetPropagationDefineChannel(nn.Module):
         super().__init__()
         self.width = width
         self.prop_channels = list(prop_channels)
-
-        # Exact supplied architecture is defined for width=12 and 24ch concat.
         if width != 12 or tuple(prop_channels) != (24, 32, 48, 72):
-            raise ValueError(
-                'This experiment intentionally fixes the supplied architecture: '
-                'width=12, prop_channels=(24,32,48,72).'
-            )
-
+            raise ValueError('Exact supplied architecture requires width=12 and prop_channels=(24,32,48,72).')
         self.encoders = nn.ModuleList()
         self.decoders = nn.ModuleList()
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
-
         enc_channels = self.prop_channels[:-1]
         middle_ch = self.prop_channels[-1]
-
         for idx, num in enumerate(enc_blk_nums):
             in_ch = self.prop_channels[idx]
             out_ch = self.prop_channels[idx + 1]
-            self.encoders.append(
-                nn.Sequential(
-                    *[
-                        NAFBlockLayerNormCRandWithoutSCA(
-                            in_ch, drop_out_rate=drop_out_rate
-                        )
-                        for _ in range(num)
-                    ]
-                )
-            )
-            self.downs.append(
-                nn.Conv2d(in_ch, out_ch, kernel_size=2, stride=2, bias=True)
-            )
-
-        self.middle_blks = nn.Sequential(
-            *[
-                NAFBlockLayerNormCRandWithoutSCA(
-                    middle_ch, drop_out_rate=drop_out_rate
-                )
-                for _ in range(middle_blk_num)
-            ]
-        )
-
+            self.encoders.append(nn.Sequential(*[
+                NAFBlockLayerNormCRandWithoutSCA(in_ch, drop_out_rate=drop_out_rate)
+                for _ in range(num)
+            ]))
+            self.downs.append(nn.Conv2d(in_ch, out_ch, 2, 2, bias=True))
+        self.middle_blks = nn.Sequential(*[
+            NAFBlockLayerNormCRandWithoutSCA(middle_ch, drop_out_rate=drop_out_rate)
+            for _ in range(middle_blk_num)
+        ])
         chan = middle_ch
         skip_channels = enc_channels[::-1]
         for num, skip_ch in zip(dec_blk_nums, skip_channels):
-            self.ups.append(
-                nn.Sequential(
-                    nn.Conv2d(
-                        chan,
-                        skip_ch * 4,
-                        kernel_size=1,
-                        stride=1,
-                        padding=0,
-                        bias=False,
-                    ),
-                    nn.PixelShuffle(2),
-                )
-            )
+            self.ups.append(nn.Sequential(
+                nn.Conv2d(chan, skip_ch * 4, 1, 1, 0, bias=False),
+                nn.PixelShuffle(2),
+            ))
             chan = skip_ch
-            self.decoders.append(
-                nn.Sequential(
-                    *[
-                        NAFBlockLayerNormCRandWithoutSCA(
-                            chan, drop_out_rate=drop_out_rate
-                        )
-                        for _ in range(num)
-                    ]
-                )
-            )
-
+            self.decoders.append(nn.Sequential(*[
+                NAFBlockLayerNormCRandWithoutSCA(chan, drop_out_rate=drop_out_rate)
+                for _ in range(num)
+            ]))
         self.feature_out = nn.Conv2d(chan, width, 3, 1, 1, bias=True)
         self.padder_size = 2 ** len(self.encoders)
 
@@ -161,49 +113,41 @@ class NAFUNetPropagationDefineChannel(nn.Module):
         _, _, h, w = cur_feat.shape
         x = torch.cat([cur_feat, prop_feat], dim=1)
         x = self.check_image_size(x)
-
         encs = []
         for encoder, down in zip(self.encoders, self.downs):
             x = encoder(x)
             encs.append(x)
             x = down(x)
-
         x = self.middle_blks(x)
-
-        for decoder, up, enc_skip in zip(
-            self.decoders, self.ups, encs[::-1]
-        ):
+        for decoder, up, enc_skip in zip(self.decoders, self.ups, encs[::-1]):
             x = up(x)
             x = x + enc_skip
             x = decoder(x)
-
         x = self.feature_out(x)
         return x[:, :, :h, :w]
 
 
 class NanoVNRNAFNetRGB(nn.Module):
-    """Supplied NanoVNR NAFNet structure with RGB input as the only architecture change.
+    """Same model structure as supplied file, except feat_extract input is RGB 3ch instead of 4ch.
 
-    Differences from the supplied Python file:
-      - input has 3 RGB channels instead of 4 channels
-      - feat_extract is Conv2d(3, 12, 3, 1, 1)
-
-    Everything else intentionally follows the supplied model structure.
+    grad_checkpoint only changes activation storage during training; it does not
+    change layers, parameters, tensor math, or inference outputs.
     """
 
-    def __init__(self, num_feat=12):
+    def __init__(self, num_feat=12, grad_checkpoint=False):
         super().__init__()
         if num_feat != 12:
             raise ValueError('Exact supplied architecture requires num_feat=12.')
         self.num_feat = num_feat
-
-        # Only requested architecture change: 4 input channels -> RGB 3 channels.
+        self.grad_checkpoint = bool(grad_checkpoint)
         self.feat_extract = nn.Conv2d(3, num_feat, 3, 1, 1, bias=True)
-
         self.forward_net = NAFUNetPropagationDefineChannel()
         self.backward_net = NAFUNetPropagationDefineChannel()
         self.fusion = nn.Conv2d(num_feat * 2, num_feat, 1, 1, 0, bias=True)
         self.conv_last = nn.Conv2d(num_feat, 3, 3, 1, 1, bias=True)
+
+    def set_grad_checkpoint(self, enabled=True):
+        self.grad_checkpoint = bool(enabled)
 
     def config_dict(self):
         return {
@@ -215,38 +159,37 @@ class NanoVNRNAFNetRGB(nn.Module):
             'dec_blk_nums': [1, 1, 1],
         }
 
+    def _prop(self, module, cur_feat, prop_feat):
+        if self.training and self.grad_checkpoint:
+            return checkpoint(module, cur_feat, prop_feat, use_reentrant=False)
+        return module(cur_feat, prop_feat)
+
     def forward(self, x, prev_forward_feat=None):
         if x.ndim != 5:
             raise ValueError(f'Expected B,T,3,H,W, got {tuple(x.shape)}')
         b, t, c, h, w = x.size()
         if c != 3:
             raise ValueError(f'RGB model expects C=3, got {c}')
-
         noisy_rgb = x
         x_flat = x.reshape(-1, c, h, w)
-        feats = self.feat_extract(x_flat)
-        feats = feats.reshape(b, t, -1, h, w)
+        feats = self.feat_extract(x_flat).reshape(b, t, -1, h, w)
 
         forward_feats = []
         if prev_forward_feat is None:
-            feat_prop = torch.zeros_like(feats[:, 0, ...])
+            feat_prop = torch.zeros_like(feats[:, 0])
         else:
-            if prev_forward_feat.shape != feats[:, 0, ...].shape:
-                raise ValueError(
-                    'prev_forward_feat shape mismatch: '
-                    f'{tuple(prev_forward_feat.shape)} vs {tuple(feats[:,0,...].shape)}'
-                )
+            if prev_forward_feat.shape != feats[:, 0].shape:
+                raise ValueError(f'prev_forward_feat shape mismatch: {tuple(prev_forward_feat.shape)} vs {tuple(feats[:,0].shape)}')
             feat_prop = prev_forward_feat
-
         for i in range(t):
-            feat_prop = self.forward_net(feats[:, i, ...], feat_prop)
+            feat_prop = self._prop(self.forward_net, feats[:, i], feat_prop)
             forward_feats.append(feat_prop)
         next_forward_feat = feat_prop
 
         backward_feats = []
-        feat_prop = torch.zeros_like(feats[:, 0, ...])
+        feat_prop = torch.zeros_like(feats[:, 0])
         for i in range(t - 1, -1, -1):
-            feat_prop = self.backward_net(feats[:, i, ...], feat_prop)
+            feat_prop = self._prop(self.backward_net, feats[:, i], feat_prop)
             backward_feats.insert(0, feat_prop)
 
         outputs = []
@@ -254,8 +197,5 @@ class NanoVNRNAFNetRGB(nn.Module):
             f_fused = torch.cat([forward_feats[i], backward_feats[i]], dim=1)
             f_fused = self.fusion(f_fused)
             residual = self.conv_last(f_fused)
-            out = noisy_rgb[:, i] + residual
-            outputs.append(out)
-
-        final_video = torch.stack(outputs, dim=1)
-        return final_video, next_forward_feat
+            outputs.append(noisy_rgb[:, i] + residual)
+        return torch.stack(outputs, dim=1), next_forward_feat
