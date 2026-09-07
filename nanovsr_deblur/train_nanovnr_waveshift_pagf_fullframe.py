@@ -9,6 +9,7 @@ from PIL import Image
 
 import train_nanovnr_nafnet_rgb_fullframe as common
 from models.network_nanovnr_waveshift_pagf import NanoVNRWaveShiftPAGF
+from amp_training import AMP_POLICY, make_scaler, restore_scaler, training_update
 
 
 ARCHITECTURE = 'NanoVNRWaveShiftPAGF'
@@ -61,7 +62,7 @@ def validate_bsd_root(root):
     return str(actual)
 
 
-def save_checkpoint(path, model, optimizer, scheduler, step, args):
+def save_checkpoint(path, model, optimizer, scheduler, step, args, scaler, amp_stats):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -72,6 +73,9 @@ def save_checkpoint(path, model, optimizer, scheduler, step, args):
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
+            'scaler': scaler.state_dict(),
+            'amp_policy': AMP_POLICY,
+            'amp_stats': dict(amp_stats),
             'step': int(step),
             'phase': 'fixed_t6',
             'args': vars(args),
@@ -127,30 +131,27 @@ def run_preflight(args, roots, device):
         model = build_model(args.variant, grad_checkpoint=False).to(device).train()
         criterion = common.CharbonnierLoss().to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
-        scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+        scaler = make_scaler(args.amp)
         sample = component[sample_index]
         blur = sample['blur'].unsqueeze(0).to(device, non_blocking=True)
         sharp = sample['sharp'].unsqueeze(0).to(device, non_blocking=True)
         torch.cuda.reset_peak_memory_stats(device)
-        pred = None
-        loss = None
-        try:
-            optimizer.zero_grad(set_to_none=True)
+        def preflight_loss():
             with torch.cuda.amp.autocast(enabled=args.amp):
                 pred, _ = run_model(model, blur, args.grad_checkpoint)
-                loss = criterion(pred, sharp)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            if not torch.isfinite(grad_norm):
-                raise RuntimeError(f'Non-finite preflight gradient: {grad_norm}')
-            scaler.step(optimizer)
-            scaler.update()
+                return criterion(pred, sharp)
+
+        try:
+            result = training_update(
+                model, optimizer, scaler, preflight_loss,
+                context={'stage': 'preflight', 'source': family,
+                         'shape': list(blur.shape)},
+            )
             torch.cuda.synchronize(device)
             peak = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
             print(
                 f'PREFLIGHT_PASS family={family} T={args.num_frames} H={height} '
-                f'W={width} loss={loss.item():.6f} peak_gpu_gib={peak:.3f}',
+                f'W={width} loss={result["loss"]:.6f} peak_gpu_gib={peak:.3f}',
                 flush=True,
             )
         except torch.cuda.OutOfMemoryError:
@@ -162,10 +163,6 @@ def run_preflight(args, roots, device):
             )
         finally:
             del model, criterion, optimizer, scaler, blur, sharp
-            if pred is not None:
-                del pred
-            if loss is not None:
-                del loss
             torch.cuda.empty_cache()
 
     if failures:
@@ -200,6 +197,8 @@ def parse_args():
     parser.add_argument('--amp', action='store_true')
     parser.add_argument('--grad-checkpoint', action='store_true')
     parser.add_argument('--preflight-only', action='store_true')
+    parser.add_argument('--stop-after-step', type=int, default=None,
+                        help='Save and exit after this successful step; cosine horizon unchanged.')
     return parser.parse_args()
 
 
@@ -210,6 +209,9 @@ def main():
             f'This deployment-matched recipe requires T={TRAIN_FRAMES}, '
             f'got T={args.num_frames}.'
         )
+    end_step = args.stop_after_step or args.total_iterations
+    if not 0 < end_step <= args.total_iterations:
+        raise ValueError('--stop-after-step must be within the training horizon')
     common.set_seed(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA GPU is required.')
@@ -251,8 +253,9 @@ def main():
         optimizer, T_max=args.total_iterations, eta_min=args.eta_min
     )
     criterion = common.CharbonnierLoss().to(device)
-    scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+    scaler = make_scaler(args.amp)
 
+    amp_stats = {'overflow_attempts': 0, 'recovered_batches': 0}
     start_step = 0
     if args.resume:
         checkpoint_data = torch.load(args.resume, map_location='cpu')
@@ -267,18 +270,38 @@ def main():
             )
         if checkpoint_data.get('model_config') != model.config_dict():
             raise RuntimeError('Checkpoint model_config does not match current model.')
+        old_args = checkpoint_data.get('args', {})
+        for key in ('total_iterations', 'lr', 'eta_min', 'num_frames', 'amp'):
+            if key in old_args and old_args[key] != getattr(args, key):
+                raise RuntimeError(f'CHECKPOINT_RECIPE_ARGUMENT_MISMATCH: {key}')
         model.load_state_dict(checkpoint_data['model'], strict=True)
         optimizer.load_state_dict(checkpoint_data['optimizer'])
         scheduler.load_state_dict(checkpoint_data['scheduler'])
         start_step = int(checkpoint_data.get('step', 0))
+        scaler_status = restore_scaler(scaler, checkpoint_data)
+        amp_stats.update(checkpoint_data.get('amp_stats', {}))
+        print(f'{scaler_status} scale={scaler.get_scale()} AMP_POLICY={AMP_POLICY}', flush=True)
+        print('DATA_ORDER_RESUME=RESEEDED_NOT_EXACT_SAMPLER_REPLAY', flush=True)
+        if scheduler.last_epoch != start_step or scheduler.T_max != args.total_iterations:
+            raise RuntimeError('CHECKPOINT_SCHEDULER_STEP_OR_HORIZON_MISMATCH')
+        for name, value in model.state_dict().items():
+            if not torch.isfinite(value).all().item():
+                raise RuntimeError(f'NON_FINITE_CHECKPOINT_MODEL: {name}')
+        for state in optimizer.state.values():
+            for name, value in state.items():
+                if torch.is_tensor(value) and not torch.isfinite(value).all().item():
+                    raise RuntimeError(f'NON_FINITE_CHECKPOINT_OPTIMIZER: {name}')
         print(f'RESUMED_FROM={args.resume} STEP={start_step}', flush=True)
+
+    if start_step >= end_step:
+        raise RuntimeError('Resume checkpoint must precede requested end step')
 
     _, loader, audit = common.build_loader(roots, args.num_frames, args.workers)
     common.print_audit('TRAIN_T6', audit)
     train_iterator = iter(loader)
     model.train()
 
-    for step in range(start_step + 1, args.total_iterations + 1):
+    for step in range(start_step + 1, end_step + 1):
         try:
             batch = next(train_iterator)
         except StopIteration:
@@ -292,20 +315,36 @@ def main():
                 f'Blur/GT shape mismatch: {tuple(blur.shape)} vs {tuple(sharp.shape)}'
             )
 
-        optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=args.amp):
-            prediction, _ = run_model(model, blur, args.grad_checkpoint)
-            loss = criterion(prediction, sharp)
-        if not torch.isfinite(loss):
-            raise RuntimeError(f'Non-finite loss at step {step}: {loss.item()}')
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-        if not torch.isfinite(grad_norm):
-            raise RuntimeError(f'Non-finite gradient at step {step}: {grad_norm}')
-        scaler.step(optimizer)
-        scaler.update()
-        scheduler.step()
+        context = {'step': step, 'source': batch.get('source'),
+                   'sequence': batch.get('seq'), 'shape': list(blur.shape)}
+
+        def batch_loss():
+            with torch.cuda.amp.autocast(enabled=args.amp):
+                prediction, _ = run_model(model, blur, args.grad_checkpoint)
+                return criterion(prediction, sharp)
+
+        def emit_amp(record):
+            if record['event'] == 'AMP_OVERFLOW':
+                amp_stats['overflow_attempts'] += 1
+            if record['event'] == 'AMP_RECOVERED':
+                amp_stats['recovered_batches'] += 1
+            text = json.dumps(record, allow_nan=False)
+            print(text, flush=True)
+            with (output_dir / 'amp_events.jsonl').open('a') as stream:
+                stream.write(text + '\n')
+
+        try:
+            result = training_update(model, optimizer, scaler, batch_loss,
+                                     context=context, emit=emit_amp)
+        except RuntimeError as error:
+            # Preserve the last good checkpoint; never label failed weights as valid.
+            diagnostic = dict(context, error=str(error), last_successful_step=step - 1,
+                              scaler=scaler.state_dict(), amp_stats=amp_stats)
+            (output_dir / f'failure_step_{step:07d}.json').write_text(
+                json.dumps(diagnostic, indent=2, allow_nan=False) + '\n'
+            )
+            raise
+        scheduler.step()  # Exactly once per successful optimizer update.
 
         if step == 1 or step % 100 == 0:
             lr = optimizer.param_groups[0]['lr']
@@ -316,16 +355,18 @@ def main():
             print(
                 f'step={step}/{args.total_iterations} phase=fixed_t6 '
                 f'source={source_text} T={frames} H={height} W={width} '
-                f'loss={loss.item():.6f} lr={lr:.3e} '
-                f'grad_norm={float(grad_norm):.4f} peak_gpu_gib={peak:.3f}',
+                f'loss={result["loss"]:.6f} lr={lr:.3e} '
+                f'grad_norm={result["grad_norm"]:.4f} scale={result["scale"]:.1f} '
+                f'overflow_total={amp_stats["overflow_attempts"]} '
+                f'peak_gpu_gib={peak:.3f}',
                 flush=True,
             )
 
-        if step % args.save_every == 0 or step == args.total_iterations:
+        if step % args.save_every == 0 or step == end_step:
             path = output_dir / f'step_{step:07d}.pth'
-            save_checkpoint(path, model, optimizer, scheduler, step, args)
+            save_checkpoint(path, model, optimizer, scheduler, step, args, scaler, amp_stats)
             save_checkpoint(
-                output_dir / 'latest.pth', model, optimizer, scheduler, step, args
+                output_dir / 'latest.pth', model, optimizer, scheduler, step, args, scaler, amp_stats
             )
             print(f'SAVED={path}', flush=True)
 
