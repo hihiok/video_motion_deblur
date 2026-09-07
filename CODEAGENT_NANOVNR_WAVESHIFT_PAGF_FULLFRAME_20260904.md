@@ -8,7 +8,7 @@ RGB full-frame NAFNet baseline under the same evaluation protocol, and any
 quality regression or protocol mismatch must be reported honestly.
 
 Do not write, redesign, or modify code in this task. Do not change model width,
-loss, temporal lengths, dataset policy, or resolution to make a failed run pass.
+loss, fixed T=6, dataset policy, or resolution to make a failed run pass.
 
 ## 1. Repository
 
@@ -18,12 +18,12 @@ Repository:
 
 Branch:
 
-`agent/nanovnr-waveshift-pagf-fullframe-20260904`
+`agent/nanovnr-waveshift-pagf-t6-fullframe-20260907`
 
 Required code commit (the checked-out HEAD may be a later documentation-only
 commit, but this commit must be its ancestor):
 
-`254af1898fa8374a1d7de27e1c7d9abb5cb28d3e`
+`b86b4b409a4577f44b380a63bfb67c85fb8b1b8f`
 
 Primary files:
 
@@ -131,18 +131,12 @@ train on full 1920x1080. If BSD is 640x480, train on full 640x480.
 
 ## 4. Training recipe
 
-Phase 1:
-
-- steps 1-50000;
-- T=7.
-
-Phase 2:
-
-- steps 50001-150000;
-- T=30.
-
-The only change at step 50001 is T=7 -> T=30. Do not reset optimizer or
-scheduler.
+- Fixed T=6 for every step from 1 through 150000.
+- Input tensor is `[1, 6, 3, H, W]` at each dataset sample's native resolution.
+- All six output frames receive equal-weight Charbonnier supervision.
+- There is no temporal-length curriculum and no T=30 phase.
+- This matches the deployment constraint of using 4-6 frames, including future
+  frames, and supersedes the stopped T=7 -> T=30 recipe.
 
 - Loss: Charbonnier only.
 - Optimizer: Adam, betas `(0.9, 0.99)`.
@@ -170,9 +164,9 @@ source "$CONDA_PREFIX/etc/conda/activate.d/proxy_env.sh" 2>/dev/null || true
 
 ROOT=/mnt/ssd1/z00919662/motion_deblur
 REPO=$ROOT/video_motion_deblur_nanovnr_waveshift_pagf
-RUN=$ROOT/runs/nanovnr_waveshift_pagf_fullframe_bsd3ms24ms_20260904
-BRANCH=agent/nanovnr-waveshift-pagf-fullframe-20260904
-EXPECTED_CODE_COMMIT=254af1898fa8374a1d7de27e1c7d9abb5cb28d3e
+RUN=$ROOT/runs/nanovnr_waveshift_pagf_fullframe_t6_bsd3ms24ms_20260907
+BRANCH=agent/nanovnr-waveshift-pagf-t6-fullframe-20260907
+EXPECTED_CODE_COMMIT=b86b4b409a4577f44b380a63bfb67c85fb8b1b8f
 INPUT=$ROOT/input/xiaobieli38_trimmed.mp4
 GOPRO=$ROOT/datasets/GoPro
 DVD=$ROOT/datasets/DVD
@@ -250,7 +244,7 @@ python audit_nanovnr_waveshift_pagf.py --device cpu \
 
 Required:
 
-- all 6 unit tests pass;
+- all 7 unit tests pass;
 - `HAAR_ROUNDTRIP_MAX_ABS_DIFF < 1e-6`;
 - deploy output/state max difference `< 2e-5`;
 - architecture audit PASS;
@@ -293,7 +287,7 @@ BSD_ALLOWED_SPLITS=train,test
 BSD_NESTED_CONFIG_SPLITS=FORBIDDEN
 ```
 
-Report GoPro/DVD/BSD native resolutions and T=7/T=30 window counts. Audit every
+Report GoPro/DVD/BSD native resolutions and T=6 window counts. Audit every
 printed BSD path. Any BSD training path outside `$BSD/train`, or test path
 outside `$BSD/test`, is an immediate stop:
 
@@ -329,7 +323,7 @@ done
 Do not describe the complete GSTS block as zero FLOPs. Only the indexing/shift
 operation is zero MAC; fusion convolutions are counted.
 
-## 9. Step E — select one GPU and run real native T=30 preflight
+## 9. Step E — select one GPU and run real native T=6 preflight
 
 ```bash
 nvidia-smi --query-gpu=index,name,memory.total,memory.free \
@@ -357,8 +351,7 @@ python train_nanovnr_waveshift_pagf_fullframe.py \
   --dvd-root "$DVD" \
   --bsd-root "$BSD" \
   --output-dir "$RUN/preflight" \
-  --short-frames 7 \
-  --long-frames 30 \
+  --num-frames 6 \
   --amp \
   --grad-checkpoint \
   --preflight-only \
@@ -373,7 +366,7 @@ disable modules, CPU-offload, or modify the model. Stop and report:
 
 ```text
 HUMAN_ACTION_REQUIRED: YES
-REASON: NATIVE_FULLFRAME_T30_PREFLIGHT_OOM
+REASON: NATIVE_FULLFRAME_T6_PREFLIGHT_OOM
 DATASET: <family>
 RESOLUTION: <WxH>
 GPU: <name/index>
@@ -401,9 +394,7 @@ python train_nanovnr_waveshift_pagf_fullframe.py \
   --dvd-root "$DVD" \
   --bsd-root "$BSD" \
   --output-dir "$RUN/train" \
-  --short-frames 7 \
-  --long-frames 30 \
-  --switch-iter 50000 \
+  --num-frames 6 \
   --total-iterations 150000 \
   --workers 2 \
   --lr 3e-4 \
@@ -418,7 +409,7 @@ python train_nanovnr_waveshift_pagf_fullframe.py \
 Expected:
 
 ```text
-RECIPE_ID=nanovnr_waveshift_pagf_edge_native_fullframe_bsd3ms24ms_v2
+RECIPE_ID=nanovnr_waveshift_pagf_edge_native_fullframe_t6_bsd3ms24ms_v3
 ARCHITECTURE=NanoVNRWaveShiftPAGF
 VARIANT=waveshift_edge
 ```
@@ -440,11 +431,11 @@ for STEP in 0050000 0075000 0100000 0125000 0150000; do
   python eval_gopro_nanovnr_waveshift_pagf.py \
     --gopro-root "$GOPRO" \
     --checkpoint "$CKPT" \
-    --num-frames 15 \
+    --num-frames 6 \
     --max-clips 100 \
     --fp16 \
     --deploy-reparam \
-    2>&1 | tee "$RUN/eval/step_${STEP}_T15.log"
+    2>&1 | tee "$RUN/eval/step_${STEP}_T6.log"
 done
 ```
 
@@ -452,13 +443,13 @@ Protocol is fixed:
 
 - same first 100 GoPro test clips;
 - native full frame;
-- T=15;
+- T=6;
 - RGB PSNR;
 - prediction clamped to `[0,1]`;
 - FP16 inference;
 - deployed RepConv.
 
-Choose `BEST_T15_CHECKPOINT` by highest `OUTPUT_PSNR_RGB`. Do not choose by
+Choose `BEST_T6_CHECKPOINT` by highest `OUTPUT_PSNR_RGB`. Do not choose by
 training loss or business-video appearance.
 
 Sanity gate: `OUTPUT_PSNR_RGB` must exceed `INPUT_PSNR_RGB`. If it does not,
@@ -471,14 +462,14 @@ item is confirmed identical. Otherwise label the comparison `NOT_COMPARABLE`.
 ## 12. Step H — exact same-target context evaluation
 
 Run the best checkpoint on the exact same `(sequence, absolute center index)`
-targets across T=7, T=15, and T=30:
+targets across T=4, T=5, and T=6:
 
 ```bash
-BEST=<absolute path to BEST_T15_CHECKPOINT>
+BEST=<absolute path to BEST_T6_CHECKPOINT>
 python eval_gopro_context_matched.py \
   --gopro-root "$GOPRO" \
   --checkpoint "$BEST" \
-  --contexts 7 15 30 \
+  --contexts 4 5 6 \
   --max-targets 100 \
   --fp16 \
   --deploy-reparam \
@@ -487,11 +478,11 @@ python eval_gopro_context_matched.py \
 
 Report:
 
-- `CENTER_T7_OUTPUT_PSNR`;
-- `CENTER_T15_OUTPUT_PSNR`;
-- `CENTER_T30_OUTPUT_PSNR`;
-- `CENTER_CONTEXT_GAIN_T15_VS_T7`;
-- `CENTER_CONTEXT_GAIN_T30_VS_T15`.
+- `CENTER_T4_OUTPUT_PSNR`;
+- `CENTER_T5_OUTPUT_PSNR`;
+- `CENTER_T6_OUTPUT_PSNR`;
+- `CENTER_CONTEXT_GAIN_T5_VS_T4`;
+- `CENTER_CONTEXT_GAIN_T6_VS_T5`.
 
 Do not call separately selected first-100 T windows "matched".
 
@@ -509,16 +500,16 @@ comparable only when its checkpoint says:
 
 ```text
 architecture=NanoVNRNAFNetRGB
-recipe_id=nanovnr_nafnet_rgb_native_fullframe_mix_bsd_train_test_v2
+recipe_id=<a genuine fixed-T6 NanoVNRNAFNetRGB baseline recipe>
 args.bsd_root=/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms
 ```
 
 If comparable 50k/75k/100k/125k/150k baseline checkpoints exist, evaluate them
-with `eval_gopro_nanovnr_nafnet_rgb.py` using the same T=15/first-100/native/RGB/
+with `eval_gopro_nanovnr_nafnet_rgb.py` using the same T=6/first-100/native/RGB/
 FP16 protocol and choose its best checkpoint. Report:
 
 ```text
-GAIN_VS_COMPARABLE_RGB_NAFNET_T15 = improved_best - baseline_best
+GAIN_VS_COMPARABLE_RGB_NAFNET_T6 = improved_best - baseline_best
 ```
 
 Strict effect success requires a positive gain; `>= +0.05 dB` is considered a
@@ -541,9 +532,12 @@ Input:
 
 `/mnt/ssd1/z00919662/motion_deblur/input/xiaobieli38_trimmed.mp4`
 
-First use core chunk 15. The script automatically uses halo 2 for two GSTS
-blocks, processes only non-overlapping core frames recurrently, carries the LL
-forward state, and resets backward state per core chunk.
+Use recurrent core chunk 2. The script automatically uses halo 2 on each side
+for the two GSTS blocks, so an interior call decodes at most `2 + 2 + 2 = 6`
+frames. It processes only the two non-overlapping core frames recurrently,
+carries the LL forward state, and resets backward state per core chunk. This is
+the deployment mode that respects the actual 4-6-frame input budget while still
+using future frames.
 
 ```bash
 mkdir -p "$RUN/business"
@@ -553,13 +547,13 @@ python infer_video_nanovnr_waveshift_pagf.py \
   --output "$RUN/business/business_nanovnr_waveshift_pagf.mp4" \
   --side-by-side-output \
     "$RUN/business/input_vs_nanovnr_waveshift_pagf.mp4" \
-  --chunk 15 \
+  --chunk 2 \
   --fp16 \
   2>&1 | tee "$RUN/business/inference.log"
 ```
 
-If inference OOMs, only reduce the inference core chunk to 9, then 7. Keep the
-automatic GSTS halo and native resolution. Do not alter training or model config.
+If inference OOMs, only reduce the inference core chunk to 1. Keep the automatic
+GSTS halo and native resolution. Do not alter training or model config.
 
 Verify output frame count, fps, and resolution equal the input. Then run:
 
@@ -567,12 +561,12 @@ Verify output frame count, fps, and resolution equal the input. Then run:
 python audit_video_output.py \
   --input "$INPUT" \
   --output "$RUN/business/business_nanovnr_waveshift_pagf.mp4" \
-  --chunk 15 \
+  --chunk 2 \
   --preview "$RUN/business/five_frame_preview.jpg" \
   2>&1 | tee "$RUN/business/video_output_audit.log"
 ```
 
-If inference used chunk 9 or 7, pass that exact value to `audit_video_output.py`.
+If inference used chunk 1, pass that exact value to `audit_video_output.py`.
 
 Automated red flags requiring explicit reporting:
 
@@ -607,7 +601,7 @@ Stop and return `HUMAN_ACTION_REQUIRED: YES` for:
 - architecture/unit/deploy-fusion test failure;
 - BSD path-policy violation;
 - blur/GT filename or shape mismatch;
-- native T=30 preflight OOM;
+- native T=6 preflight OOM;
 - non-finite loss or gradient;
 - missing/corrupt checkpoint;
 - output frame/resolution mismatch.
@@ -623,14 +617,14 @@ STATUS: PASS / PARTIAL / FAIL
 HUMAN_ACTION_REQUIRED: YES / NO
 HUMAN_ACTION: inspect <video> and <preview>, or exact blocker
 
-GITHUB_BRANCH: agent/nanovnr-waveshift-pagf-fullframe-20260904
+GITHUB_BRANCH: agent/nanovnr-waveshift-pagf-t6-fullframe-20260907
 GITHUB_HEAD: <sha>
 REQUIRED_CODE_COMMIT_PRESENT: YES / NO
 SOURCE_CODE_MODIFIED_BY_CODEAGENT: NO
 
 ARCHITECTURE: NanoVNRWaveShiftPAGF
 VARIANT: waveshift_edge
-RECIPE_ID: nanovnr_waveshift_pagf_edge_native_fullframe_bsd3ms24ms_v2
+RECIPE_ID: nanovnr_waveshift_pagf_edge_native_fullframe_t6_bsd3ms24ms_v3
 MODEL_CONFIG: <dict>
 UNIT_TESTS: PASS / FAIL
 HAAR_ROUNDTRIP_MAX_ABS_DIFF: <value>
@@ -639,14 +633,10 @@ DEPLOY_STATE_MAX_ABS_DIFF: <value>
 
 BSD_TRAIN_ONLY_FOR_TRAINING: YES / NO
 BSD_NESTED_CONFIG_SPLITS_USED: NO / YES
-GOPRO_T7_WINDOWS: <n>
-GOPRO_T30_WINDOWS: <n>
-DVD_T7_WINDOWS: <n>
-DVD_T30_WINDOWS: <n>
-BSD_TRAIN_T7_WINDOWS: <n>
-BSD_TRAIN_T30_WINDOWS: <n>
-BSD_TEST_T7_WINDOWS: <n>
-BSD_TEST_T30_WINDOWS: <n>
+GOPRO_T6_WINDOWS: <n>
+DVD_T6_WINDOWS: <n>
+BSD_TRAIN_T6_WINDOWS: <n>
+BSD_TEST_T6_WINDOWS: <n>
 GOPRO_NATIVE_RESOLUTIONS: <...>
 DVD_NATIVE_RESOLUTIONS: <...>
 BSD_TRAIN_NATIVE_RESOLUTIONS: <...>
@@ -654,7 +644,7 @@ BSD_TEST_NATIVE_RESOLUTIONS: <...>
 
 GPU: <physical index and name>
 GPU_TOTAL_FREE_BEFORE: <...>
-PREFLIGHT_T30_NATIVE_FULLFRAME: PASS / FAIL
+PREFLIGHT_T6_NATIVE_FULLFRAME: PASS / FAIL
 PREFLIGHT_PEAK_MEMORY_BY_RESOLUTION: <...>
 
 PARAMS_BASELINE: <n>
@@ -666,23 +656,23 @@ MACS_PER_FRAME_WAVESHIFT_1280x720: <...>
 MACS_PER_FRAME_WAVESHIFT_1920x1080: <...>
 
 TRAIN_FINAL_STEP: <n>
-CHECKPOINT_PSNR_T15: <50k/75k/100k/125k/150k table>
-BEST_T15_CHECKPOINT: <path>
-BEST_T15_INPUT_PSNR: <dB>
-BEST_T15_OUTPUT_PSNR: <dB>
+CHECKPOINT_PSNR_T6: <50k/75k/100k/125k/150k table>
+BEST_T6_CHECKPOINT: <path>
+BEST_T6_INPUT_PSNR: <dB>
+BEST_T6_OUTPUT_PSNR: <dB>
 GAIN_VS_BLUR_INPUT: <dB>
 
 MATCHED_CENTER_TARGETS: <n>
-CENTER_T7_OUTPUT_PSNR: <dB>
-CENTER_T15_OUTPUT_PSNR: <dB>
-CENTER_T30_OUTPUT_PSNR: <dB>
-CENTER_CONTEXT_GAIN_T15_VS_T7: <dB>
-CENTER_CONTEXT_GAIN_T30_VS_T15: <dB>
+CENTER_T4_OUTPUT_PSNR: <dB>
+CENTER_T5_OUTPUT_PSNR: <dB>
+CENTER_T6_OUTPUT_PSNR: <dB>
+CENTER_CONTEXT_GAIN_T5_VS_T4: <dB>
+CENTER_CONTEXT_GAIN_T6_VS_T5: <dB>
 
 COMPARABLE_BASELINE_AVAILABLE: YES / NO
 COMPARABLE_BASELINE_CHECKPOINT: <path or N/A>
-COMPARABLE_BASELINE_T15_PSNR: <dB or N/A>
-GAIN_VS_COMPARABLE_RGB_NAFNET_T15: <dB or UNVERIFIED>
+COMPARABLE_BASELINE_T6_PSNR: <dB or N/A>
+GAIN_VS_COMPARABLE_RGB_NAFNET_T6: <dB or UNVERIFIED>
 EFFECT_NUMERICAL_STATUS: CLEAR_GAIN / SMALL_GAIN / REGRESSION / UNVERIFIED
 
 BUSINESS_OUTPUT: <path>
