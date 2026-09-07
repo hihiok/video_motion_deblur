@@ -14,10 +14,11 @@ from models.network_nanovnr_waveshift_pagf import NanoVNRWaveShiftPAGF
 ARCHITECTURE = 'NanoVNRWaveShiftPAGF'
 EXPECTED_BSD_ROOT = Path('/mnt/ssd1/z00919662/datasets/BSD/BSD_3ms24ms')
 RECIPE_IDS = {
-    'haar_pagf': 'nanovnr_haar_pagf_native_fullframe_bsd3ms24ms_v2',
-    'waveshift': 'nanovnr_waveshift_pagf_native_fullframe_bsd3ms24ms_v2',
-    'waveshift_edge': 'nanovnr_waveshift_pagf_edge_native_fullframe_bsd3ms24ms_v2',
+    'haar_pagf': 'nanovnr_haar_pagf_native_fullframe_t6_bsd3ms24ms_v3',
+    'waveshift': 'nanovnr_waveshift_pagf_native_fullframe_t6_bsd3ms24ms_v3',
+    'waveshift_edge': 'nanovnr_waveshift_pagf_edge_native_fullframe_t6_bsd3ms24ms_v3',
 }
+TRAIN_FRAMES = 6
 
 
 def build_model(variant, grad_checkpoint=False):
@@ -60,7 +61,7 @@ def validate_bsd_root(root):
     return str(actual)
 
 
-def save_checkpoint(path, model, optimizer, scheduler, step, args, phase):
+def save_checkpoint(path, model, optimizer, scheduler, step, args):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -72,7 +73,7 @@ def save_checkpoint(path, model, optimizer, scheduler, step, args, phase):
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
             'step': int(step),
-            'phase': phase,
+            'phase': 'fixed_t6',
             'args': vars(args),
         },
         path,
@@ -109,8 +110,8 @@ def run_model(model, blur, use_checkpoint):
 
 def run_preflight(args, roots, device):
     print('PREFLIGHT_ONLY=YES', flush=True)
-    dataset, _, audit = common.build_loader(roots, args.long_frames, workers=0)
-    common.print_audit('PREFLIGHT_LONG', audit)
+    dataset, _, audit = common.build_loader(roots, args.num_frames, workers=0)
+    common.print_audit('PREFLIGHT_T6', audit)
     representatives = representatives_by_family_resolution(dataset)
     keys = [list(key) for key in representatives]
     print('PREFLIGHT_RESOLUTION_KEYS=' + json.dumps(keys), flush=True)
@@ -118,7 +119,7 @@ def run_preflight(args, roots, device):
 
     for (family, height, width), (component, sample_index) in representatives.items():
         print(
-            f'PREFLIGHT_BEGIN family={family} T={args.long_frames} '
+            f'PREFLIGHT_BEGIN family={family} T={args.num_frames} '
             f'H={height} W={width} variant={args.variant}',
             flush=True,
         )
@@ -148,14 +149,14 @@ def run_preflight(args, roots, device):
             torch.cuda.synchronize(device)
             peak = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
             print(
-                f'PREFLIGHT_PASS family={family} T={args.long_frames} H={height} '
+                f'PREFLIGHT_PASS family={family} T={args.num_frames} H={height} '
                 f'W={width} loss={loss.item():.6f} peak_gpu_gib={peak:.3f}',
                 flush=True,
             )
         except torch.cuda.OutOfMemoryError:
             failures.append((family, height, width, 'forward_or_backward'))
             print(
-                f'PREFLIGHT_OOM family={family} T={args.long_frames} '
+                f'PREFLIGHT_OOM family={family} T={args.num_frames} '
                 f'H={height} W={width} stage=forward_or_backward',
                 flush=True,
             )
@@ -171,7 +172,7 @@ def run_preflight(args, roots, device):
         print('PREFLIGHT_STATUS=FAIL', flush=True)
         print('PREFLIGHT_FAILED=' + json.dumps([list(item) for item in failures]), flush=True)
         raise RuntimeError(
-            'Native full-frame T=30 OOM. Do not crop, resize, shorten T, or alter the model.'
+            'Native full-frame T=6 OOM. Do not crop, resize, shorten T, or alter the model.'
         )
     print('PREFLIGHT_STATUS=PASS', flush=True)
 
@@ -189,9 +190,7 @@ def parse_args():
         default='waveshift_edge',
         help='Primary experiment is waveshift_edge; other choices are controlled ablations.',
     )
-    parser.add_argument('--short-frames', type=int, default=7)
-    parser.add_argument('--long-frames', type=int, default=30)
-    parser.add_argument('--switch-iter', type=int, default=50000)
+    parser.add_argument('--num-frames', type=int, default=TRAIN_FRAMES)
     parser.add_argument('--total-iterations', type=int, default=150000)
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--lr', type=float, default=3e-4)
@@ -206,6 +205,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.num_frames != TRAIN_FRAMES:
+        raise RuntimeError(
+            f'This deployment-matched recipe requires T={TRAIN_FRAMES}, '
+            f'got T={args.num_frames}.'
+        )
     common.set_seed(args.seed)
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA GPU is required.')
@@ -224,8 +228,7 @@ def main():
     print('BSD_POLICY=STRICT_BSD_3MS24MS_DIRECT_TRAIN_TEST_ONLY', flush=True)
     print('BSD_ROOT=' + args.bsd_root, flush=True)
     print(
-        f'TRAIN shortT={args.short_frames} longT={args.long_frames} '
-        f'switch={args.switch_iter} total={args.total_iterations}',
+        f'TRAIN T={args.num_frames} fixed_for_all_steps total={args.total_iterations}',
         flush=True,
     )
     print(
@@ -270,31 +273,12 @@ def main():
         start_step = int(checkpoint_data.get('step', 0))
         print(f'RESUMED_FROM={args.resume} STEP={start_step}', flush=True)
 
-    current_long = start_step > args.switch_iter
-    current_t = args.long_frames if current_long else args.short_frames
-    phase = 'long' if current_long else 'short'
-    _, loader, audit = common.build_loader(roots, current_t, args.workers)
-    common.print_audit(f'PHASE_{phase.upper()}', audit)
+    _, loader, audit = common.build_loader(roots, args.num_frames, args.workers)
+    common.print_audit('TRAIN_T6', audit)
     train_iterator = iter(loader)
     model.train()
 
     for step in range(start_step + 1, args.total_iterations + 1):
-        should_long = step > args.switch_iter
-        if should_long != current_long:
-            del train_iterator, loader
-            torch.cuda.empty_cache()
-            current_long = True
-            current_t = args.long_frames
-            phase = 'long'
-            _, loader, audit = common.build_loader(roots, current_t, args.workers)
-            print(
-                f'SWITCH_PHASE_AT_STEP={step}: '
-                f'T={args.short_frames} -> T={args.long_frames}',
-                flush=True,
-            )
-            common.print_audit('PHASE_LONG', audit)
-            train_iterator = iter(loader)
-
         try:
             batch = next(train_iterator)
         except StopIteration:
@@ -323,14 +307,14 @@ def main():
         scaler.update()
         scheduler.step()
 
-        if step == 1 or step % 100 == 0 or step in (args.switch_iter, args.switch_iter + 1):
+        if step == 1 or step % 100 == 0:
             lr = optimizer.param_groups[0]['lr']
             source = batch.get('source')
             source_text = source[0] if isinstance(source, (list, tuple)) else str(source)
             _, frames, _, height, width = blur.shape
             peak = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
             print(
-                f'step={step}/{args.total_iterations} phase={phase} '
+                f'step={step}/{args.total_iterations} phase=fixed_t6 '
                 f'source={source_text} T={frames} H={height} W={width} '
                 f'loss={loss.item():.6f} lr={lr:.3e} '
                 f'grad_norm={float(grad_norm):.4f} peak_gpu_gib={peak:.3f}',
@@ -339,9 +323,9 @@ def main():
 
         if step % args.save_every == 0 or step == args.total_iterations:
             path = output_dir / f'step_{step:07d}.pth'
-            save_checkpoint(path, model, optimizer, scheduler, step, args, phase)
+            save_checkpoint(path, model, optimizer, scheduler, step, args)
             save_checkpoint(
-                output_dir / 'latest.pth', model, optimizer, scheduler, step, args, phase
+                output_dir / 'latest.pth', model, optimizer, scheduler, step, args
             )
             print(f'SAVED={path}', flush=True)
 

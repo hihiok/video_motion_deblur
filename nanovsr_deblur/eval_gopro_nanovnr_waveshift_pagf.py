@@ -33,7 +33,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gopro-root', required=True)
     parser.add_argument('--checkpoint', required=True)
-    parser.add_argument('--num-frames', type=int, default=15)
+    parser.add_argument('--num-frames', type=int, default=6)
     parser.add_argument('--max-clips', type=int, default=100)
     parser.add_argument('--center-only', action='store_true')
     parser.add_argument('--fp16', action='store_true')

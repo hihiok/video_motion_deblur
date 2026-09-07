@@ -1,4 +1,4 @@
-"""Compare T=7/15/30 on exactly matched GoPro center-frame targets."""
+"""Compare deployment-relevant T=4/5/6 on matched GoPro center targets."""
 
 import argparse
 
@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gopro-root', required=True)
     parser.add_argument('--checkpoint', required=True)
-    parser.add_argument('--contexts', type=int, nargs='+', default=(7, 15, 30))
+    parser.add_argument('--contexts', type=int, nargs='+', default=(4, 5, 6))
     parser.add_argument('--max-targets', type=int, default=100)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--deploy-reparam', action='store_true')

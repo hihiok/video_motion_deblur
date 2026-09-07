@@ -69,7 +69,13 @@ def main():
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--side-by-side-output', default=None)
-    parser.add_argument('--chunk', type=int, default=15)
+    parser.add_argument(
+        '--chunk', type=int, default=2,
+        help=(
+            'Non-overlapping recurrent core length. The default core=2 plus '
+            'the model GSTS halo=2 on each side uses at most six decoded frames.'
+        ),
+    )
     parser.add_argument(
         '--halo', type=int, default=-1,
         help='-1 uses the exact GSTS temporal radius stored by the model.',

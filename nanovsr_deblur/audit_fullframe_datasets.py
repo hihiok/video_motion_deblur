@@ -46,7 +46,7 @@ def assert_under(path, allowed_root):
         ) from exc
 
 
-def audit_bsd_split(bsd_root, split, t_values=(7, 30)):
+def audit_bsd_split(bsd_root, split, t_values=(6,)):
     bsd_root = Path(bsd_root).resolve()
     allowed = (bsd_root / split).resolve()
     if not allowed.is_dir():
@@ -107,7 +107,7 @@ def main():
 
     # Mixed training audit: BSD is automatically strict-root-split because the
     # family name is BSD inside build_mixed_dataset().
-    for t in (7, 30):
+    for t in (6,):
         print(f'\n=== FULL_FRAME_TRAIN_AUDIT T={t} ===')
         dataset, _, audit = build_mixed_dataset(
             roots,
