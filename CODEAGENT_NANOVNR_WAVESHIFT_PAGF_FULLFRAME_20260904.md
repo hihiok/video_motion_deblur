@@ -1,5 +1,12 @@
 # CODEAGENT TASK — NanoVNR WaveShift-PAGF native-full-frame training
 
+> AMP recovery update (2026-09-07): for the run stopped at step 5843,
+> execute `CODEAGENT_WAVESHIFT_T6_AMP_RECOVERY_20260907.md` first. It supersedes
+> this document's Step F resume command and immediate-stop-on-AMP-gradient rule.
+> Never restart that interrupted run with the old trainer. All model, dataset,
+> native-resolution, T=6, loss, and evaluation requirements below still apply.
+
+
 ## 0. Goal and non-negotiable rule
 
 Train and evaluate the already implemented `NanoVNRWaveShiftPAGF` model. The
@@ -415,8 +422,10 @@ VARIANT=waveshift_edge
 ```
 
 Monitor loss, gradient norm, LR, source-family sampling, resolution, GPU memory,
-and checkpoint creation. Non-finite loss/gradient, repeated explosive spikes,
+and checkpoint creation. Non-finite loss, unrecovered gradient overflow,
 missing checkpoint, wrong recipe, or a different model config is a failure.
+The committed AMP recovery policy retries the same batch after scale backoff;
+only successful optimizer updates advance the scheduler and training step.
 
 ## 11. Step G — checkpoint selection under one fixed protocol
 
@@ -602,7 +611,9 @@ Stop and return `HUMAN_ACTION_REQUIRED: YES` for:
 - BSD path-policy violation;
 - blur/GT filename or shape mismatch;
 - native T=6 preflight OOM;
-- non-finite loss or gradient;
+- non-finite loss;
+- AMP overflow not recovered within eight retries of the same batch;
+- non-finite gradients without AMP, or non-finite aggregate norm with finite gradients;
 - missing/corrupt checkpoint;
 - output frame/resolution mismatch.
 
