@@ -79,6 +79,11 @@ class WaveShiftPAGFTest(unittest.TestCase):
         self.assertEqual(config['gsts_radii'], [2, 4])
         self.assertTrue(config['edge_aware_hf'])
 
+    def test_training_recipe_is_fixed_to_six_frames(self):
+        from train_nanovnr_waveshift_pagf_fullframe import TRAIN_FRAMES
+
+        self.assertEqual(TRAIN_FRAMES, 6)
+
 
 if __name__ == '__main__':
     unittest.main()
