@@ -21,7 +21,7 @@ Repository:
 ```text
 https://github.com/hihiok/video_motion_deblur.git
 branch: agent/rtfocuser-shift-dst-t6-v1
-minimum code commit: TO_BE_FILLED
+minimum code commit: 5d853be34c4da034a29bb4baec1d2ec36dfc3ff7
 ```
 
 ## Proxy and SSL setup
@@ -93,7 +93,7 @@ PASS requires an empty `git status --short`. The checked-out HEAD must contain
 the minimum commit listed above or a descendant on the same branch:
 
 ```bash
-git merge-base --is-ancestor TO_BE_FILLED HEAD
+git merge-base --is-ancestor 5d853be34c4da034a29bb4baec1d2ec36dfc3ff7 HEAD
 ```
 
 ## Step 2: select the existing CUDA environment
