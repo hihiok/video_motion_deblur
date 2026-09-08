@@ -98,4 +98,3 @@ def atomic_torch_save(payload: Any, destination: str | Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     torch.save(payload, temporary)
     os.replace(temporary, destination)
-
