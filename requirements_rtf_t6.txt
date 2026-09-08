@@ -1,0 +1,5 @@
+numpy>=1.23,<3
+Pillow>=9.5
+PyYAML>=6.0
+pytest>=7.4
+# Use the CUDA-matched torch already installed on the training server.

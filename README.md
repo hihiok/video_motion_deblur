@@ -134,3 +134,19 @@ BSSTNet remains dependent on the authors' official Google Drive folder. Do not s
 3. The CUDA models must pass the 24-frame smoke gate on the target server before the full sequence starts.
 4. No output should be accepted when frame count, RGB order, borders, temporal order or checkpoint strict-loading checks fail.
 5. Do not describe a broken inference result as domain mismatch.
+
+## RT-Focuser + Shift-Net-s + DSTNet temporal training
+
+The `rtf_t6` package contains a checkpoint-compatible T=6 training path that
+keeps the RT-Focuser image-restoration backbone while adding parameter-free
+grouped spatial-temporal shifts and similarity-gated bidirectional propagation.
+The default candidate has fewer parameters and lower estimated per-frame
+arithmetic than RT-Focuser Standard.
+
+```bash
+GPU=0 ENV_NAME=deblur_runtime bash scripts/run_rtf_t6_training.sh smoke
+GPU=0 ENV_NAME=deblur_runtime bash scripts/run_rtf_t6_training.sh formal
+```
+
+See `docs/RTFOCUSER_SHIFT_DST_T6_DESIGN.md` for the method and
+`docs/CODEAGENT_RTFOCUSER_SHIFT_DST_T6_20260908.md` for the server procedure.

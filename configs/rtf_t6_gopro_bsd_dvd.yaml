@@ -1,0 +1,68 @@
+experiment: rtfocuser_shift_dst_t6_gopro_bsd_dvd_v1
+seed: 20260908
+output: /mnt/ssd1/z00919662/motion_deblur/runs/rtfocuser_shift_dst_t6_gopro_bsd_dvd_v1
+
+# The first existing root with a valid strict paired-frame layout is selected.
+datasets:
+  gopro:
+    roots:
+      - /mnt/ssd1/z00919662/motion_deblur/datasets/GoPro
+      - /mnt/ssd1/z00919662/motion_deblur/datasets/gopro
+      - /mnt/ssd1/z00919662/motion_deblur/datasets/GOPRO_Large
+  bsd:
+    roots:
+      - /mnt/ssd1/z00919662/motion_deblur/datasets/BSD
+      - /mnt/ssd1/z00919662/datasets/BSD
+      - /mnt/ssd1/z00919662/RVRT/datasets/BSD
+  dvd:
+    roots:
+      - /mnt/ssd1/z00919662/motion_deblur/datasets/DVD
+      - /mnt/ssd1/z00919662/motion_deblur/datasets/dvd
+
+model:
+  dims: [16, 32, 128, 160, 256]
+  depths: [3, 3, 3, 2, 2]
+  kernels: [3, 3, 7, 7, 7]
+  shift_fold_div: 8
+  shift_strength: 0.5
+  propagation_strength: 0.25
+  propagation_temperature: 0.15
+
+train:
+  clip_length: 6
+  crop_size: 256
+  batch_size: 1
+  gradient_accumulation: 2
+  workers: 4
+  samples_per_epoch: 10000
+  domain_weights:
+    gopro: 1.0
+    bsd: 1.0
+    dvd: 1.0
+  total_iters: 180000
+  lr: 0.00005
+  min_lr: 0.000001
+  warmup_iters: 2000
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  clip_grad: 1.0
+  ema_decay: 0.999
+  amp: true
+  log_every: 100
+  validate_every: 5000
+  save_every: 5000
+
+loss:
+  pixel_weight: 1.0
+  fft_weight: 0.05
+  edge_weight: 0.1
+  temporal_weight: 0.15
+  acceleration_weight: 0.03
+  temporal_start_iter: 5000
+  temporal_ramp_iters: 20000
+
+validation:
+  crop_size: 256
+  batch_size: 1
+  stride: 6
+  max_clips_per_domain: 24
