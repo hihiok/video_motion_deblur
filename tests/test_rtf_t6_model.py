@@ -79,3 +79,44 @@ def test_default_candidate_is_below_frame_baseline_budget():
     report = compare_models(baseline, candidate, height=32, width=32, clip_length=6)
     assert report["parameters_pass"]
     assert report["compute_pass"]
+
+
+def test_activation_checkpointing_preserves_output_gradients_and_bn_buffers():
+    reference = RTFocuserT6(
+        dims=SMALL_DIMS,
+        depths=(1, 1, 1, 1, 1),
+        kernels=SMALL_KERNELS,
+        activation_checkpointing=False,
+    ).train()
+    checkpointed = RTFocuserT6(
+        dims=SMALL_DIMS,
+        depths=(1, 1, 1, 1, 1),
+        kernels=SMALL_KERNELS,
+        activation_checkpointing=True,
+    ).train()
+    checkpointed.load_state_dict(reference.state_dict())
+    video = torch.rand(1, 2, 3, 32, 32)
+
+    reference_output = reference(video)
+    reference_output.mean().backward()
+    checkpointed_output = checkpointed(video)
+    checkpointed_output.mean().backward()
+
+    torch.testing.assert_close(checkpointed_output, reference_output, rtol=1e-5, atol=1e-6)
+    for (_, reference_parameter), (_, checkpointed_parameter) in zip(
+        reference.named_parameters(), checkpointed.named_parameters()
+    ):
+        if reference_parameter.grad is None or checkpointed_parameter.grad is None:
+            assert reference_parameter.grad is checkpointed_parameter.grad
+        else:
+            torch.testing.assert_close(
+                checkpointed_parameter.grad,
+                reference_parameter.grad,
+                rtol=2e-4,
+                atol=2e-6,
+            )
+    reference_buffers = dict(reference.named_buffers())
+    checkpointed_buffers = dict(checkpointed.named_buffers())
+    for name in reference_buffers:
+        if "running_" in name or "num_batches_tracked" in name:
+            torch.testing.assert_close(checkpointed_buffers[name], reference_buffers[name])

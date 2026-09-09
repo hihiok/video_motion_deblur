@@ -34,3 +34,18 @@ def test_balanced_clip_shape_is_t6(tmp_path: Path):
     item = dataset[0]
     assert item["blur"].shape == (6, 3, 16, 16)
     assert item["gt"].shape == (6, 3, 16, 16)
+
+
+def test_zero_crop_keeps_native_full_frame(tmp_path: Path):
+    make_sequence(tmp_path, "train", "scene_a")
+    _, sequences = discover_sequences("demo", tmp_path, "train", min_frames=6)
+    dataset = BalancedMultiDomainClips(
+        {"demo": sequences},
+        clip_length=6,
+        crop_size=0,
+        samples_per_epoch=1,
+        augment=False,
+    )
+    item = dataset[0]
+    assert item["blur"].shape == (6, 3, 20, 24)
+    assert item["gt"].shape == (6, 3, 20, 24)

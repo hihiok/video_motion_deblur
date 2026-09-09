@@ -187,6 +187,18 @@ def main() -> None:
     is_main = rank == 0
     train_cfg = config["train"]
     model_cfg = config.get("model", {})
+    train_crop_size = int(train_cfg.get("crop_size", 256))
+    validation_crop_size = int(config.get("validation", {}).get("crop_size", 256))
+    spatial_mode = str(train_cfg.get("spatial_mode", "crop")).lower()
+    if spatial_mode not in {"crop", "full_frame"}:
+        raise ValueError(f"Unsupported train.spatial_mode: {spatial_mode}")
+    if spatial_mode == "full_frame":
+        if train_crop_size != 0 or validation_crop_size != 0:
+            raise ValueError(
+                "full_frame mode requires train.crop_size=0 and validation.crop_size=0"
+            )
+        if int(train_cfg.get("batch_size", 1)) != 1:
+            raise ValueError("Native full-frame training is locked to batch_size=1")
     output = Path(args.output or config["output"]).expanduser().resolve()
     if is_main:
         output.mkdir(parents=True, exist_ok=True)
@@ -201,7 +213,7 @@ def main() -> None:
     train_dataset = BalancedMultiDomainClips(
         train_domains,
         clip_length=clip_length,
-        crop_size=int(train_cfg.get("crop_size", 256)),
+        crop_size=train_crop_size,
         samples_per_epoch=int(train_cfg.get("samples_per_epoch", 10_000)),
         domain_weights=train_cfg.get("domain_weights"),
         seed=seed,
@@ -210,7 +222,7 @@ def main() -> None:
     val_dataset = ValidationClips(
         val_domains,
         clip_length=clip_length,
-        crop_size=int(config.get("validation", {}).get("crop_size", 256)),
+        crop_size=validation_crop_size,
         stride=int(config.get("validation", {}).get("stride", 6)),
         max_clips_per_domain=int(config.get("validation", {}).get("max_clips_per_domain", 24)),
         seed=seed + 1,
@@ -290,6 +302,9 @@ def main() -> None:
             "val_data": dataset_summary(val_domains),
             "complexity": complexity,
             "initialization": init_report,
+            "spatial_mode": spatial_mode,
+            "train_crop_size": train_crop_size,
+            "validation_crop_size": validation_crop_size,
         }
         print(json.dumps(startup, indent=2))
         with open(log_path, "a", encoding="utf-8") as handle:
@@ -314,6 +329,16 @@ def main() -> None:
                 group["lr"] = lr
             blur = batch["blur"].to(device, non_blocking=True)
             gt = batch["gt"].to(device, non_blocking=True)
+            if spatial_mode == "full_frame" and iteration == start_iteration + 1 and is_main:
+                first_batch = {
+                    "event": "full_frame_first_batch",
+                    "shape": list(blur.shape),
+                    "crop_applied": False,
+                    "resize_applied": False,
+                }
+                print(json.dumps(first_batch))
+                with open(log_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(first_batch) + "\n")
             with torch.autocast(
                 device_type=device.type,
                 dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,

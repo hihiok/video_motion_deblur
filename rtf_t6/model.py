@@ -12,11 +12,13 @@ remain below the unmodified RT-Focuser Standard baseline.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from typing import Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def _resize(x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
@@ -365,6 +367,7 @@ class RTFocuserT6(nn.Module):
         shift_strength: float = 0.5,
         propagation_strength: float = 0.25,
         propagation_temperature: float = 0.15,
+        activation_checkpointing: bool = False,
     ):
         super().__init__()
         if not 0.0 <= shift_strength <= 1.0:
@@ -372,9 +375,42 @@ class RTFocuserT6(nn.Module):
         self.backbone = RT_Focuser(dims=dims, depths=depths, kernels=kernels)
         self.temporal_shift = GroupedSpatialTemporalShift(shift_fold_div)
         self.shift_strength = float(shift_strength)
+        self.activation_checkpointing = bool(activation_checkpointing)
         self.bidirectional = SimilarityGatedBidirectionalPropagation(
             propagation_strength, propagation_temperature
         )
+
+    @contextmanager
+    def _preserve_batch_norm_running_stats(self):
+        """Prevent checkpoint recomputation from updating BN buffers twice."""
+        snapshots = []
+        for module in self.backbone.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm) and module.track_running_stats:
+                snapshots.append(
+                    (
+                        module,
+                        module.running_mean.detach().clone(),
+                        module.running_var.detach().clone(),
+                        module.num_batches_tracked.detach().clone(),
+                    )
+                )
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for module, mean, variance, batches in snapshots:
+                    module.running_mean.copy_(mean)
+                    module.running_var.copy_(variance)
+                    module.num_batches_tracked.copy_(batches)
+
+    def _memory_efficient_call(self, function, *args: torch.Tensor) -> torch.Tensor:
+        if not self.training or not self.activation_checkpointing:
+            return function(*args)
+
+        def contexts():
+            return nullcontext(), self._preserve_batch_norm_running_stats()
+
+        return checkpoint(function, *args, use_reentrant=False, context_fn=contexts)
 
     @staticmethod
     def _to_4d(x: torch.Tensor) -> torch.Tensor:
@@ -405,20 +441,40 @@ class RTFocuserT6(nn.Module):
             video = self._to_5d(flat, b, t)
         flat_image = self._to_4d(video)
 
-        x1 = self.backbone.encoder1(self.backbone.stem(flat_image))
+        x1 = self._memory_efficient_call(
+            lambda image: self.backbone.encoder1(self.backbone.stem(image)), flat_image
+        )
         x1 = self._shift(self._to_5d(x1, b, t))
-        x2 = self.backbone.encoder2(self.backbone.Maxpool(self._to_4d(x1)))
+        x2 = self._memory_efficient_call(
+            self.backbone.encoder2, self.backbone.Maxpool(self._to_4d(x1))
+        )
         x2 = self._shift(self._to_5d(x2, b, t))
-        x3 = self.backbone.encoder3(self.backbone.Maxpool(self._to_4d(x2)))
+        x3 = self._memory_efficient_call(
+            self.backbone.encoder3, self.backbone.Maxpool(self._to_4d(x2))
+        )
         x3 = self._shift(self._to_5d(x3, b, t))
-        x4 = self.backbone.encoder4(self.backbone.Maxpool(self._to_4d(x3)))
+        x4 = self._memory_efficient_call(
+            self.backbone.encoder4, self.backbone.Maxpool(self._to_4d(x3))
+        )
         x4 = self._shift(self._to_5d(x4, b, t))
         x4 = self.bidirectional(x4)
-        x5 = self.backbone.encoder5(self.backbone.Maxpool(self._to_4d(x4)))
+        x5 = self._memory_efficient_call(
+            self.backbone.encoder5, self.backbone.Maxpool(self._to_4d(x4))
+        )
 
-        output = self.backbone.decode(
+        x1_4d, x2_4d, x3_4d, x4_4d = tuple(
+            self._to_4d(x) for x in (x1, x2, x3, x4)
+        )
+        output = self._memory_efficient_call(
+            lambda image, f1, f2, f3, f4, f5: self.backbone.decode(
+                image, (f1, f2, f3, f4, f5)
+            ),
             flat_image,
-            tuple(self._to_4d(x) for x in (x1, x2, x3, x4)) + (x5,),
+            x1_4d,
+            x2_4d,
+            x3_4d,
+            x4_4d,
+            x5,
         )
         output = self._to_5d(output, b, t)
         return output[..., :original_h, :original_w]

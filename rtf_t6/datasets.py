@@ -226,6 +226,8 @@ class BalancedMultiDomainClips(Dataset):
         self.domains = domains
         self.clip_length = clip_length
         self.crop_size = crop_size
+        if self.crop_size < 0:
+            raise ValueError("crop_size must be >= 0; use 0 for native full frames")
         self.samples_per_epoch = samples_per_epoch
         self.seed = seed
         self.epoch = 0
@@ -277,6 +279,8 @@ class ValidationClips(Dataset):
     ):
         self.clip_length = clip_length
         self.crop_size = crop_size
+        if self.crop_size < 0:
+            raise ValueError("crop_size must be >= 0; use 0 for native full frames")
         self.seed = seed
         stride = stride or clip_length
         items = []
