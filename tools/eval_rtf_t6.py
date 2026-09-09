@@ -20,6 +20,7 @@ from rtf_t6.datasets import build_domain_sequences, read_rgb
 from rtf_t6.inference import infer_spatial_tiles, owned_temporal_range, window_starts
 from rtf_t6.losses import psnr, ssim
 from rtf_t6.model import RT_Focuser_Standard, RTFocuserT6
+from rtf_t6.protocol import check_checkpoint_protocol, inference_window
 
 
 class FrameVideoWrapper(nn.Module):
@@ -39,8 +40,8 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--split", default="val", choices=("val", "test"))
-    parser.add_argument("--window", type=int, default=6)
-    parser.add_argument("--temporal-overlap", type=int, default=4)
+    parser.add_argument("--window", type=int, default=None)
+    parser.add_argument("--temporal-overlap", type=int, default=None)
     parser.add_argument("--tile-size", type=int, default=384)
     parser.add_argument("--tile-overlap", type=int, default=48)
     parser.add_argument("--max-sequences-per-domain", type=int, default=0)
@@ -50,12 +51,12 @@ def main():
     args = parser.parse_args()
     with open(args.config, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
-    if args.window != 6:
-        raise ValueError("Evaluation protocol is locked to T=6")
+    args.window, args.temporal_overlap = inference_window(config, args.window, args.temporal_overlap)
     domains, roots = build_domain_sequences(config["datasets"], args.split, args.window)
     device = torch.device(args.device)
-    payload = torch.load(Path(args.checkpoint).expanduser().resolve(), map_location="cpu")
+    payload = torch.load(Path(args.checkpoint).expanduser().resolve(), map_location="cpu", weights_only=False)
     if args.architecture == "t6":
+        check_checkpoint_protocol(payload, config)
         model = RTFocuserT6(**config.get("model", {}))
         model.load_state_dict(unwrap_state_dict(payload), strict=True)
     else:
@@ -64,7 +65,10 @@ def main():
         model = FrameVideoWrapper(frame_model)
     model = model.to(device).eval()
     dtype = torch.float16 if args.amp and device.type == "cuda" else None
-    report = {"architecture": args.architecture, "split": args.split, "roots": roots, "domains": {}}
+    report = {"architecture": args.architecture, "split": args.split, "roots": roots, "domains": {},
+              "window": args.window, "temporal_overlap": args.temporal_overlap,
+              "tile_size": args.tile_size, "tile_overlap": args.tile_overlap,
+              "amp": args.amp, "checkpoint": str(Path(args.checkpoint).resolve())}
     all_domain_psnr = []
     all_domain_ssim = []
     all_domain_temporal = []

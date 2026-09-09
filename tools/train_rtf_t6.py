@@ -33,6 +33,7 @@ from rtf_t6.datasets import (
 )
 from rtf_t6.losses import VideoDeblurLoss, psnr, temporal_residual_error
 from rtf_t6.model import RT_Focuser_Standard, RTFocuserT6
+from rtf_t6.protocol import check_checkpoint_protocol, check_fullframe, clip_length as configured_clip_length
 
 
 def arguments():
@@ -42,6 +43,8 @@ def arguments():
     parser.add_argument("--resume", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--max-iters", type=int, default=None)
+    parser.add_argument("--stop-after", type=int, default=None,
+                        help="Pause at this microbatch without changing the configured LR schedule")
     parser.add_argument("--samples-per-epoch", type=int, default=None)
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--validate-every", type=int, default=None)
@@ -136,6 +139,7 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, amp: bo
             domain_temporal[domain].append(
                 float(temporal_residual_error(prediction[item : item + 1], gt[item : item + 1]).cpu())
             )
+        del blur, gt, prediction
     metrics = {"domains": {}}
     for domain in sorted(domain_psnr):
         metrics["domains"][domain] = {
@@ -193,6 +197,7 @@ def main() -> None:
     if spatial_mode not in {"crop", "full_frame"}:
         raise ValueError(f"Unsupported train.spatial_mode: {spatial_mode}")
     if spatial_mode == "full_frame":
+        check_fullframe(config)
         if train_crop_size != 0 or validation_crop_size != 0:
             raise ValueError(
                 "full_frame mode requires train.crop_size=0 and validation.crop_size=0"
@@ -205,9 +210,7 @@ def main() -> None:
         with open(output / "resolved_config.yaml", "w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, sort_keys=False)
 
-    clip_length = int(train_cfg.get("clip_length", 6))
-    if clip_length != 6:
-        raise ValueError(f"This experiment is locked to T=6, got {clip_length}")
+    clip_length = configured_clip_length(config)
     train_domains, train_roots = build_domain_sequences(config["datasets"], "train", clip_length)
     val_domains, val_roots = build_domain_sequences(config["datasets"], "val", clip_length)
     train_dataset = BalancedMultiDomainClips(
@@ -223,7 +226,7 @@ def main() -> None:
         val_domains,
         clip_length=clip_length,
         crop_size=validation_crop_size,
-        stride=int(config.get("validation", {}).get("stride", 6)),
+        stride=int(config.get("validation", {}).get("stride", clip_length)),
         max_clips_per_domain=int(config.get("validation", {}).get("max_clips_per_domain", 24)),
         seed=seed + 1,
     )
@@ -240,7 +243,7 @@ def main() -> None:
 
     baseline = RT_Focuser_Standard()
     candidate = RTFocuserT6(**model_cfg)
-    complexity = compare_models(baseline, candidate, height=64, width=64, clip_length=6)
+    complexity = compare_models(baseline, candidate, height=64, width=64, clip_length=clip_length)
     if not complexity["parameters_pass"] or not complexity["compute_pass"]:
         raise RuntimeError(f"Complexity gate failed: {complexity}")
     del baseline
@@ -249,6 +252,7 @@ def main() -> None:
     if args.resume:
         resume_path = Path(args.resume).expanduser().resolve()
         resume = torch.load(resume_path, map_location="cpu", weights_only=False)
+        check_checkpoint_protocol(resume, config, resume=True)
         candidate.load_state_dict(resume["model"], strict=True)
     else:
         pretrained = args.pretrained or config.get("pretrained")
@@ -288,6 +292,9 @@ def main() -> None:
     validate_every = int(train_cfg.get("validate_every", 5_000))
     save_every = int(train_cfg.get("save_every", 5_000))
     clip_grad = float(train_cfg.get("clip_grad", 1.0))
+    stop_iteration = total_iters if args.stop_after is None else int(args.stop_after)
+    if not start_iteration < stop_iteration <= total_iters or stop_iteration % accumulation:
+        raise ValueError("Stop iteration must be a future optimizer boundary within total_iters")
     log_path = output / "train_metrics.jsonl"
 
     if is_main:
@@ -305,6 +312,11 @@ def main() -> None:
             "spatial_mode": spatial_mode,
             "train_crop_size": train_crop_size,
             "validation_crop_size": validation_crop_size,
+            "clip_length": clip_length,
+            "gradient_accumulation": accumulation,
+            "iteration_unit": "microbatch",
+            "total_optimizer_updates": total_iters // accumulation,
+            "frames_per_optimizer_update": clip_length * accumulation * world_size,
         }
         print(json.dumps(startup, indent=2))
         with open(log_path, "a", encoding="utf-8") as handle:
@@ -315,13 +327,14 @@ def main() -> None:
     optimizer.zero_grad(set_to_none=True)
     running = defaultdict(float)
     running_count = 0
-    while iteration < total_iters:
+    log_started = time.perf_counter()
+    while iteration < stop_iteration:
         train_dataset.set_epoch(epoch)
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         model.train()
         for batch in train_loader:
-            if iteration >= total_iters:
+            if iteration >= stop_iteration:
                 break
             iteration += 1
             lr = learning_rate(iteration, train_cfg)
@@ -347,10 +360,12 @@ def main() -> None:
                 prediction = model(blur)
                 loss, components = criterion(prediction, gt, iteration)
                 scaled_loss = loss / accumulation
+            if not all(bool(torch.isfinite(value).all()) for value in components.values()):
+                raise FloatingPointError(f"Non-finite loss at iteration {iteration}")
             scaler.scale(scaled_loss).backward()
             if iteration % accumulation == 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad, error_if_nonfinite=True)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
@@ -366,6 +381,8 @@ def main() -> None:
                     "iteration": iteration,
                     "epoch": epoch,
                     "lr": lr,
+                    "optimizer_updates": iteration // accumulation,
+                    "seconds_per_microbatch": (time.perf_counter() - log_started) / running_count,
                     **{key: value / running_count for key, value in running.items()},
                 }
                 print(json.dumps(record))
@@ -373,8 +390,13 @@ def main() -> None:
                     handle.write(json.dumps(record) + "\n")
                 running.clear()
                 running_count = 0
+                log_started = time.perf_counter()
 
-            validation_due = iteration % validate_every == 0 or iteration == total_iters
+            # Do not retain the previous full-frame graph/input during the next
+            # forward or EMA validation. Cached allocator blocks remain reusable.
+            del blur, gt, prediction, loss, scaled_loss, components, value
+
+            validation_due = iteration % validate_every == 0 or iteration == stop_iteration
             if validation_due:
                 if world_size > 1:
                     dist.barrier()
@@ -396,7 +418,7 @@ def main() -> None:
                     best = float(value)
                     dist.barrier()
 
-            if is_main and (iteration % save_every == 0 or iteration == total_iters):
+            if is_main and (iteration % save_every == 0 or iteration == stop_iteration):
                 save_checkpoint(
                     output / "checkpoints" / "latest.pth",
                     model, ema, optimizer, scaler, iteration, epoch, best, config,
@@ -404,7 +426,8 @@ def main() -> None:
         epoch += 1
 
     if is_main:
-        print(f"TRAINING_COMPLETE iteration={iteration} best_balanced_psnr={best:.4f}")
+        status = "TRAINING_COMPLETE" if iteration == total_iters else "TRAINING_PAUSED"
+        print(f"{status} iteration={iteration} best_balanced_psnr={best:.4f}")
     if world_size > 1:
         dist.destroy_process_group()
 

@@ -18,6 +18,7 @@ from rtf_t6.checkpoint import unwrap_state_dict
 from rtf_t6.datasets import IMAGE_EXTENSIONS, read_rgb
 from rtf_t6.inference import infer_spatial_tiles, owned_temporal_range, window_starts
 from rtf_t6.model import RTFocuserT6
+from rtf_t6.protocol import check_checkpoint_protocol, inference_window
 
 
 def save_rgb(tensor: torch.Tensor, path: Path) -> None:
@@ -27,7 +28,8 @@ def save_rgb(tensor: torch.Tensor, path: Path) -> None:
 
 def load_model(config: dict, checkpoint: Path, device: torch.device) -> RTFocuserT6:
     model = RTFocuserT6(**config.get("model", {}))
-    payload = torch.load(checkpoint, map_location="cpu")
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    check_checkpoint_protocol(payload, config)
     state = unwrap_state_dict(payload)
     result = model.load_state_dict(state, strict=True)
     if result.missing_keys or result.unexpected_keys:
@@ -41,8 +43,8 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--window", type=int, default=6)
-    parser.add_argument("--temporal-overlap", type=int, default=4)
+    parser.add_argument("--window", type=int, default=None)
+    parser.add_argument("--temporal-overlap", type=int, default=None)
     parser.add_argument("--tile-size", type=int, default=384)
     parser.add_argument("--tile-overlap", type=int, default=48)
     parser.add_argument("--device", default="cuda:0")
@@ -50,8 +52,7 @@ def main():
     args = parser.parse_args()
     with open(args.config, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
-    if args.window != 6:
-        raise ValueError("This trained protocol is locked to a six-frame temporal window")
+    args.window, args.temporal_overlap = inference_window(config, args.window, args.temporal_overlap)
     input_dir = Path(args.input).expanduser().resolve()
     frames = sorted(
         path for path in input_dir.iterdir()
@@ -84,11 +85,12 @@ def main():
                 save_rgb(prediction[frame_index - start], output / frames[frame_index].name)
                 written += 1
             print(f"window {window_index + 1}/{len(starts)} [{start},{end}) wrote [{own_start},{own_end})")
+            del clip, prediction
     output_frames = sorted(path for path in output.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS)
     if written != len(frames) or len(output_frames) != len(frames):
         raise RuntimeError(f"Output count mismatch: input={len(frames)}, written={written}, files={len(output_frames)}")
     metadata = {
-        "model": "RT-Focuser-T6 (Shift/DST temporal fusion)",
+        "model": f"RT-Focuser-T{args.window} (Shift/DST temporal fusion)",
         "checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
         "input": str(input_dir),
         "output": str(output),

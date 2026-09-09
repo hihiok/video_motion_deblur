@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import pytest
 
 from rtf_t6.checkpoint import load_rtfocuser_pretrained
 from rtf_t6.complexity import compare_models, count_parameters
@@ -72,11 +73,12 @@ def test_pretrained_loader_maps_frame_keys_to_video_backbone(tmp_path: Path):
     assert report["dropped_source_keys"]
 
 
-def test_default_candidate_is_below_frame_baseline_budget():
+@pytest.mark.parametrize('length', [3, 6])
+def test_default_candidate_is_below_frame_baseline_budget(length):
     baseline = RT_Focuser_Standard()
     candidate = RTFocuserT6()
     assert count_parameters(candidate) < count_parameters(baseline)
-    report = compare_models(baseline, candidate, height=32, width=32, clip_length=6)
+    report = compare_models(baseline, candidate, height=32, width=32, clip_length=length)
     assert report["parameters_pass"]
     assert report["compute_pass"]
 
@@ -95,7 +97,7 @@ def test_activation_checkpointing_preserves_output_gradients_and_bn_buffers():
         activation_checkpointing=True,
     ).train()
     checkpointed.load_state_dict(reference.state_dict())
-    video = torch.rand(1, 2, 3, 32, 32)
+    video = torch.rand(1, 3, 3, 32, 32)
 
     reference_output = reference(video)
     reference_output.mean().backward()
