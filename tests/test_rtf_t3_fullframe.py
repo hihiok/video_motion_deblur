@@ -128,3 +128,9 @@ def test_t3_fullframe_train_resume_eval_and_infer(tmp_path):
         '--tile-size', 0, '--tile-overlap', 0)
     assert sorted(p.name for p in (tmp_path / 'inferred').glob('*.png')) == sorted(p.name for p in inputs.glob('*.png'))
     assert all(Image.open(p).size == (32, 24) for p in (tmp_path / 'inferred').glob('*.png'))
+    run('train_rtf_t6.py', '--config', config_path, '--pretrained', pretrained,
+        '--output', tmp_path / 'benchmark', '--benchmark-updates', 2, '--benchmark-warmup-updates', 1)
+    timing = json.loads((tmp_path / 'benchmark/benchmark.json').read_text())
+    assert timing['status'] == 'BENCHMARK_PASS' and timing['frames_per_update'] == 12
+    assert timing['measured_updates'] == 1 and timing['mean_seconds_per_update'] > 0
+    assert timing['weights_discarded'] and not (tmp_path / 'benchmark/checkpoints').exists()

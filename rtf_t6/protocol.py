@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 from pathlib import Path
 
 
@@ -47,7 +48,7 @@ def check_checkpoint_protocol(payload: dict, config: dict, *, resume: bool = Fal
         if saved.get("loss", {}) != config.get("loss", {}):
             raise ValueError("Resume loss configuration differs")
         for key in ("spatial_mode", "crop_size", "batch_size", "gradient_accumulation",
-                    "total_iters", "lr", "min_lr", "warmup_iters", "ema_decay"):
+                    "total_iters", "lr", "min_lr", "warmup_iters", "ema_decay", "expected_world_size"):
             if saved["train"].get(key) != config["train"].get(key):
                 raise ValueError(f"Resume train.{key} differs")
         accumulation = int(config["train"].get("gradient_accumulation", 1))
@@ -72,3 +73,30 @@ def sha256_file(path: str | Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def a100_world_size_config(config: dict, world_size: int) -> dict:
+    """Preserve 12 frames/update and 90k updates when moving from one to two GPUs."""
+    if world_size not in (1, 2):
+        raise ValueError('A100 runner supports one or two GPUs')
+    result = copy.deepcopy(config)
+    train = result['train']
+    if train.get('expected_world_size', 1) != 1:
+        raise ValueError('Build GPU variants from the single-GPU base config')
+    for key in ('gradient_accumulation', 'total_iters', 'warmup_iters',
+                'validate_every', 'save_every', 'log_every'):
+        if int(train[key]) % world_size:
+            raise ValueError(f'{key} must divide evenly across {world_size} GPUs')
+        train[key] = int(train[key]) // world_size
+    for key in ('temporal_start_iter', 'temporal_ramp_iters'):
+        result['loss'][key] = int(result['loss'][key]) // world_size
+    # samples_per_epoch is GLOBAL: DistributedSampler divides it across ranks.
+    train['workers'] = max(int(train['workers']) // world_size, 1)
+    train['expected_world_size'] = world_size
+    check_fullframe(result)
+    return result
+
+
+def rank_report_path(path: str | Path, rank: int, world_size: int) -> Path:
+    path = Path(path)
+    return path if world_size == 1 else path.with_name(f'{path.stem}.rank{rank}{path.suffix}')

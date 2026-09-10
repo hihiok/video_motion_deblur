@@ -8,12 +8,10 @@ import json
 import sys
 from pathlib import Path
 
-import torch
 import yaml
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from rtf_t6.datasets import build_domain_sequences, dataset_summary, read_rgb
 
 
 def arguments():
@@ -31,7 +29,34 @@ def fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
+def resolution_inventory(sequences, errors: list[str]) -> dict:
+    """Read every paired image header, including rare larger-than-720p clips."""
+    inventory = {}
+    for sequence in sequences:
+        shapes = set()
+        for blur, gt in zip(sequence.blur, sequence.gt):
+            with Image.open(blur) as image:
+                blur_size = image.size
+            with Image.open(gt) as image:
+                gt_size = image.size
+            if blur_size != gt_size:
+                errors.append(f'{sequence.domain}/{sequence.name}/{blur.name}: header sizes differ {blur_size} vs {gt_size}')
+            shapes.add(blur_size)
+        if len(shapes) != 1:
+            errors.append(f'{sequence.domain}/{sequence.name}: variable frame sizes within one sequence: {sorted(shapes)}')
+        for width, height in sorted(shapes):
+            key = f'{height}x{width}'
+            entry = inventory.setdefault(key, {'sequences': [], 'frames': 0})
+            entry['sequences'].append(sequence.name)
+            if len(shapes) == 1:
+                entry['frames'] += sequence.length
+    return inventory
+
+
 def main():
+    import torch
+    from rtf_t6.datasets import build_domain_sequences, dataset_summary, read_rgb
+
     args = arguments()
     with open(args.config, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
@@ -49,6 +74,10 @@ def main():
     }
     errors = []
     for domain in sorted(train):
+        resolutions = {
+            'train': resolution_inventory(train[domain], errors),
+            'val': resolution_inventory(val[domain], errors),
+        }
         train_pairs = {
             (str(blur.resolve()), str(gt.resolve()))
             for sequence in train[domain]
@@ -112,6 +141,7 @@ def main():
         if blur_gt_mse and max(blur_gt_mse) <= 1e-12:
             errors.append(f"{domain}: all sampled blur frames are byte/pixel-identical to GT")
         report["domains"][domain] = {
+            "native_resolutions": resolutions,
             "train_val_pair_overlap": len(overlap),
             "train_val_logical_id_overlap": len(logical_overlap),
             "sample_blur_gt_mse_min": min(blur_gt_mse) if blur_gt_mse else None,

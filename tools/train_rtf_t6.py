@@ -9,8 +9,10 @@ import math
 import os
 import random
 import sys
+import subprocess
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +35,7 @@ from rtf_t6.datasets import (
 )
 from rtf_t6.losses import VideoDeblurLoss, psnr, temporal_residual_error
 from rtf_t6.model import RT_Focuser_Standard, RTFocuserT6
-from rtf_t6.protocol import check_checkpoint_protocol, check_fullframe, clip_length as configured_clip_length
+from rtf_t6.protocol import check_checkpoint_protocol, check_fullframe, clip_length as configured_clip_length, sha256_file
 
 
 def arguments():
@@ -48,6 +50,9 @@ def arguments():
     parser.add_argument("--samples-per-epoch", type=int, default=None)
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--validate-every", type=int, default=None)
+    parser.add_argument('--benchmark-updates', type=int, default=0,
+                        help='Time this many updates; discard weights and skip validation/checkpoints')
+    parser.add_argument('--benchmark-warmup-updates', type=int, default=4)
     return parser.parse_args()
 
 
@@ -190,6 +195,8 @@ def main() -> None:
     seed_everything(seed, rank)
     is_main = rank == 0
     train_cfg = config["train"]
+    if int(train_cfg.get('expected_world_size', world_size)) != world_size:
+        raise ValueError('Launched world_size does not match config; regenerate for the chosen GPU count')
     model_cfg = config.get("model", {})
     train_crop_size = int(train_cfg.get("crop_size", 256))
     validation_crop_size = int(config.get("validation", {}).get("crop_size", 256))
@@ -293,6 +300,10 @@ def main() -> None:
     save_every = int(train_cfg.get("save_every", 5_000))
     clip_grad = float(train_cfg.get("clip_grad", 1.0))
     stop_iteration = total_iters if args.stop_after is None else int(args.stop_after)
+    if args.benchmark_updates:
+        if args.resume or args.benchmark_updates <= args.benchmark_warmup_updates or args.benchmark_warmup_updates < 0:
+            raise ValueError('Benchmark requires fresh weights and more updates than warmup')
+        stop_iteration = args.benchmark_updates * accumulation
     if not start_iteration < stop_iteration <= total_iters or stop_iteration % accumulation:
         raise ValueError("Stop iteration must be a future optimizer boundary within total_iters")
     log_path = output / "train_metrics.jsonl"
@@ -328,6 +339,12 @@ def main() -> None:
     running = defaultdict(float)
     running_count = 0
     log_started = time.perf_counter()
+    benchmark_times = []
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
+    if world_size > 1:
+        dist.barrier()
+    benchmark_started = time.perf_counter()
     while iteration < stop_iteration:
         train_dataset.set_epoch(epoch)
         if train_sampler is not None:
@@ -352,17 +369,21 @@ def main() -> None:
                 print(json.dumps(first_batch))
                 with open(log_path, "a", encoding="utf-8") as handle:
                     handle.write(json.dumps(first_batch) + "\n")
-            with torch.autocast(
-                device_type=device.type,
-                dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
-                enabled=amp,
-            ):
-                prediction = model(blur)
-                loss, components = criterion(prediction, gt, iteration)
-                scaled_loss = loss / accumulation
-            if not all(bool(torch.isfinite(value).all()) for value in components.values()):
-                raise FloatingPointError(f"Non-finite loss at iteration {iteration}")
-            scaler.scale(scaled_loss).backward()
+            # The forward AND backward must be inside no_sync; synchronize only
+            # the final microbatch of an accumulated optimizer update.
+            sync_context = model.no_sync() if world_size > 1 and iteration % accumulation else nullcontext()
+            with sync_context:
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
+                    enabled=amp,
+                ):
+                    prediction = model(blur)
+                    loss, components = criterion(prediction, gt, iteration)
+                    scaled_loss = loss / accumulation
+                if not all(bool(torch.isfinite(value).all()) for value in components.values()):
+                    raise FloatingPointError(f"Non-finite loss at iteration {iteration}")
+                scaler.scale(scaled_loss).backward()
             if iteration % accumulation == 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad, error_if_nonfinite=True)
@@ -371,11 +392,25 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
                 if is_main:
                     ema.update(unwrap(model))
+                if args.benchmark_updates:
+                    if device.type == 'cuda':
+                        torch.cuda.synchronize(device)
+                    if world_size > 1:
+                        dist.barrier()
+                    benchmark_times.append(time.perf_counter() - benchmark_started)
+                    benchmark_started = time.perf_counter()
 
             for key, value in components.items():
                 running[key] += float(value.detach())
             running_count += 1
-            if is_main and iteration % log_every == 0:
+            if iteration % log_every == 0:
+                # Report the mean loss across ranks, not only GPU0's samples.
+                if world_size > 1:
+                    keys = sorted(running)
+                    totals = torch.tensor([running[key] for key in keys], device=device)
+                    dist.all_reduce(totals)
+                    for key, total in zip(keys, totals.tolist()):
+                        running[key] = total / world_size
                 record = {
                     "event": "train",
                     "iteration": iteration,
@@ -385,9 +420,10 @@ def main() -> None:
                     "seconds_per_microbatch": (time.perf_counter() - log_started) / running_count,
                     **{key: value / running_count for key, value in running.items()},
                 }
-                print(json.dumps(record))
-                with open(log_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(record) + "\n")
+                if is_main:
+                    print(json.dumps(record))
+                    with open(log_path, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record) + "\n")
                 running.clear()
                 running_count = 0
                 log_started = time.perf_counter()
@@ -396,7 +432,7 @@ def main() -> None:
             # forward or EMA validation. Cached allocator blocks remain reusable.
             del blur, gt, prediction, loss, scaled_loss, components, value
 
-            validation_due = iteration % validate_every == 0 or iteration == stop_iteration
+            validation_due = not args.benchmark_updates and (iteration % validate_every == 0 or iteration == stop_iteration)
             if validation_due:
                 if world_size > 1:
                     dist.barrier()
@@ -418,16 +454,40 @@ def main() -> None:
                     best = float(value)
                     dist.barrier()
 
-            if is_main and (iteration % save_every == 0 or iteration == stop_iteration):
+            if is_main and not args.benchmark_updates and (iteration % save_every == 0 or iteration == stop_iteration):
                 save_checkpoint(
                     output / "checkpoints" / "latest.pth",
                     model, ema, optimizer, scaler, iteration, epoch, best, config,
                 )
         epoch += 1
 
+    if args.benchmark_updates:
+        timings = torch.tensor(benchmark_times, dtype=torch.float64, device=device)
+        if world_size > 1:
+            dist.all_reduce(timings, op=dist.ReduceOp.MAX)
+        if is_main:
+            measured = timings[args.benchmark_warmup_updates:]
+            seconds = float(measured.mean())
+            report = {'status': 'BENCHMARK_PASS', 'world_size': world_size,
+                      'gradient_accumulation': accumulation, 'clip_length': clip_length,
+                      'frames_per_update': clip_length * accumulation * world_size,
+                      'measured_updates': len(measured), 'warmup_updates': args.benchmark_warmup_updates,
+                      'mean_seconds_per_update': seconds,
+                      'update_seconds': measured.tolist(),
+                      'config_sha256': sha256_file(args.config),
+                      'git_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip(),
+                      'pretrained_sha256': sha256_file(args.pretrained or config['pretrained']),
+                      'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+                      'torch_version': torch.__version__, 'cuda_version': torch.version.cuda,
+                      'weights_discarded': True, 'validation_included': False}
+            (output / 'benchmark.json').write_text(json.dumps(report, indent=2) + '\n')
+            print(json.dumps(report), flush=True)
     if is_main:
+        if args.benchmark_updates:
+            print('BENCHMARK_PASS', flush=True)
         status = "TRAINING_COMPLETE" if iteration == total_iters else "TRAINING_PAUSED"
-        print(f"{status} iteration={iteration} best_balanced_psnr={best:.4f}")
+        if not args.benchmark_updates:
+            print(f"{status} iteration={iteration} best_balanced_psnr={best:.4f}")
     if world_size > 1:
         dist.destroy_process_group()
 

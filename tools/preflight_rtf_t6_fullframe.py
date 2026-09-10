@@ -9,9 +9,12 @@ import random
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 import yaml
 from PIL import Image
 
@@ -21,8 +24,8 @@ from rtf_t6.checkpoint import load_rtfocuser_pretrained
 from rtf_t6.datasets import build_domain_sequences, load_clip
 from rtf_t6.losses import VideoDeblurLoss
 from rtf_t6.model import RTFocuserT6
-from rtf_t6.protocol import check_fullframe, clip_length, sha256_file
-from tools.train_rtf_t6 import EMA
+from rtf_t6.protocol import check_fullframe, clip_length, sha256_file, rank_report_path
+from tools.train_rtf_t6 import EMA, setup_distributed, unwrap
 
 
 def arguments() -> argparse.Namespace:
@@ -54,14 +57,19 @@ check_config = check_fullframe
 
 def main() -> int:
     args = arguments()
-    output = Path(args.output).expanduser().resolve()
+    rank, world_size = int(os.environ.get('RANK', '0')), int(os.environ.get('WORLD_SIZE', '1'))
+    output = rank_report_path(Path(args.output).expanduser().resolve(), rank, world_size)
     config = yaml.safe_load(Path(args.config).read_text(encoding='utf-8'))
     check_config(config)
     if args.rounds < 2:
         raise ValueError('At least two rounds are required to test shape transitions')
     device = torch.device(args.device)
+    if int(config['train'].get('expected_world_size', world_size)) != world_size:
+        raise ValueError('Preflight world_size differs from the configured GPU count')
     if device.type != 'cuda' or not torch.cuda.is_available():
         raise RuntimeError('A CUDA GPU is required for the full-frame memory preflight')
+    if world_size > 1:
+        _, _, _, device = setup_distributed()
     torch.cuda.set_device(device)
     train_cfg = config['train']
     length = clip_length(config)
@@ -77,6 +85,8 @@ def main() -> int:
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(train_cfg['lr']),
         betas=tuple(train_cfg.get('betas', (0.9, 0.999))),
         weight_decay=float(train_cfg.get('weight_decay', 1e-4)))
+    if world_size > 1:
+        model = DistributedDataParallel(model, device_ids=[device.index], broadcast_buffers=False)
     amp = bool(train_cfg.get('amp', True))
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = VideoDeblurLoss(**config.get('loss', {})).to(device)
@@ -85,6 +95,7 @@ def main() -> int:
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
     report = {
         'status': 'IN_PROGRESS', 'config': str(Path(args.config).resolve()),
+        'rank': rank, 'world_size': world_size,
         'config_sha256': sha256_file(args.config), 'git_commit': commit,
         'pretrained': str(Path(args.pretrained).resolve()),
         'pretrained_sha256': sha256_file(args.pretrained),
@@ -129,14 +140,16 @@ def main() -> int:
                         raise RuntimeError(f'Native-shape violation for {domain}/{sequence.name}')
                     blur = blur.contiguous().unsqueeze(0).to(device)
                     gt = gt.contiguous().unsqueeze(0).to(device)
-                    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=amp):
-                        prediction = model(blur)
-                        loss, components = criterion(prediction, gt, loss_iteration)
-                    if prediction.shape != gt.shape or not bool(torch.isfinite(prediction).all()):
-                        raise FloatingPointError(f'Invalid output for {domain}')
-                    if not all(bool(torch.isfinite(value).all()) for value in components.values()):
-                        raise FloatingPointError(f'Non-finite loss for {domain}')
-                    scaler.scale(loss / accumulation).backward()
+                    sync_context = model.no_sync() if world_size > 1 and micro + 1 < accumulation else nullcontext()
+                    with sync_context:
+                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=amp):
+                            prediction = model(blur)
+                            loss, components = criterion(prediction, gt, loss_iteration)
+                        if prediction.shape != gt.shape or not bool(torch.isfinite(prediction).all()):
+                            raise FloatingPointError(f'Invalid output for {domain}')
+                        if not all(bool(torch.isfinite(value).all()) for value in components.values()):
+                            raise FloatingPointError(f'Non-finite loss for {domain}')
+                        scaler.scale(loss / accumulation).backward()
                     samples.append({key: float(value.detach()) for key, value in components.items()})
                     del blur, gt, prediction, loss, components
                 scaler.unscale_(optimizer)
@@ -145,7 +158,7 @@ def main() -> int:
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-                ema.update(model)
+                ema.update(unwrap(model))
                 report['optimizer_updates'] += 1
                 torch.cuda.synchronize(device)
                 train_seconds = time.perf_counter() - started
@@ -185,6 +198,9 @@ def main() -> int:
     report['status'] = 'FULLFRAME_PREFLIGHT_PASS'
     write_report(output, report)
     print('FULLFRAME_PREFLIGHT_PASS', flush=True)
+    if world_size > 1:
+        dist.barrier()
+        dist.destroy_process_group()
     return 0
 
 
