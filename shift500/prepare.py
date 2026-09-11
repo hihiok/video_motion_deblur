@@ -44,6 +44,7 @@ def main():
                      'resolutions':sorted({f'{r["height"]}x{r["width"]}' for r in manifest[s] if r['domain']==d})}
                 for d in DOMAINS} for s in ('train','val','test')}
     (run/'data_audit.json').write_text(json.dumps(summary,indent=2)+'\n')
+    (run/'split_audit.json').write_text(json.dumps(manifest['split_audit'],indent=2)+'\n')
     print(json.dumps(summary,indent=2));print('PREPARED',run/'config.json')
 
 if __name__=='__main__':main()

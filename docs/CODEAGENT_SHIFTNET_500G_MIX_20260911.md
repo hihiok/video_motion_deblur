@@ -107,7 +107,7 @@ python -m shift500.prepare --upstream "$SHIFT_UPSTREAM" \
   --dataset-base /data/pub/z00919662/dataset --run "$SHIFT_RUN"
 ```
 
-目录名不同则添加`--gopro-root PATH --dvd-root PATH --bsd-root PATH`，这不算修改代码。必须显式存在train/test分区。支持`split/scene/{blur,gt}`、`split/{blur,gt}/scene`和`{blur,gt}/split/scene`。严格按帧名配对、数值顺序、连续编号、分辨率检查；同一个GoPro acquisition的多个chunk整体进入同一split。官方train中留10% acquisition作val，官方test只用于最终评测；GT文件内容哈希检查跨split泄漏。该检查会读数据文件，首次可能较慢。
+目录名不同则添加`--gopro-root PATH --dvd-root PATH --bsd-root PATH`，这不算修改代码。必须显式存在train/test分区。支持`split/scene/{blur,gt}`、`split/{blur,gt}/scene`和`{blur,gt}/split/scene`。严格按帧名配对、数值顺序、连续编号、分辨率检查；仅在官方train内部，将同一个GoPro acquisition的多个chunk整体划入内部train或val。官方train/test按完整clip遵循原划分，允许GoPro不同chunk来自同一acquisition，并在split_audit.json记录重叠名称。官方train中留10% acquisition作val，官方test只用于最终评测；完整clip名称跨train/test重复仍阻塞，GT文件SHA256跨split重复仍阻塞。该检查会读数据文件，首次可能较慢。
 
 读取`data_audit.json`核对三域train/val/test数量和分辨率，包括DVD已知的1080p序列。任何缺失、配对错误或曝光混用直接报告，不能静默少训一个域。已有config时复用，不重复prepare覆盖。
 
@@ -181,3 +181,32 @@ python -m shift500.infer --config "$SHIFT500_CONFIG" \
 所有输入帧都会输出；跨场景重建独立窗口；无时间EMA。原帧率不是30时替换`--fps`。推理输出不含音频。
 
 回报必须包括：STATUS、HUMAN_ACTION_REQUIRED及具体动作（正常启动无需额外人工操作）、GitHub分支/commit、工作区是否干净、Python/PyTorch/CUDA、GPU编号、数据数量/分辨率、teacher来源与SHA256、每模型参数量/GMAC/GFLOPs/输入输出帧数、预检显存、训练update/速度/ETA、三域val/test PSNR及teacher差值、unwarped temporal L1、最佳checkpoint路径、comparison与预览路径。未执行的项写NOT_RUN，不能补论文数值冒充实测。
+
+
+## GoPro acquisition重叠阻塞的修复与恢复
+
+旧版错误地要求官方GoPro train/test的acquisition名称必须完全不同。用户报告的官方22个train clip、11个test clip中，GOPR0384_11、GOPR0385_11、GOPR0868_11、GOPR0871_11、GOPR0881_11含不同chunk跨官方分区；这不应仅凭名称判成帧泄漏。修复后官方分区保持不动，重叠只作审计。其他域的acquisition检查保留。
+
+CodeAgent现在执行：
+
+1. 沿用本文件第1节和私人附件的proxy/SSL配置，激活已有deblur_runtime；不输出代理凭据。git操作之前仍执行：
+
+```bash
+export https_proxy="$http_proxy" HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy"
+git config --global http.proxy "$http_proxy"
+git config --global https.proxy "$http_proxy"
+git config --global http.sslVerify false
+export GIT_SSL_NO_VERIFY=true
+cd /data/pub/z00919662/motion_deblur/shift500_code_v1
+test "$(git branch --show-current)" = agent/shiftnet-500g-mix-v1
+test -z "$(git status --porcelain)"
+git pull --ff-only origin agent/shiftnet-500g-mix-v1
+python -m pytest -q tests_shift500/test_splits.py
+```
+
+2. 检查原run目录。此次错误发生在make_manifest返回前，正常情况下还没有config.json；不要删除目录、手工编辑manifest或移动数据。若已经有config.json，先核对来源并回报，不覆盖它。
+3. **原样重跑此前失败的`python -m shift500.prepare ...`命令**，复用已经验证的upstream、teacher-checkpoint、dataset-base、run和三个root覆盖参数。无需重新下载权重或重新选数据根。
+4. 检查新`split_audit.json`：gopro的official_train_clips应为22、official_test_clips为11，shared acquisitions应与实际发现的5个名称一致；`gt_file_sha256_cross_split_check`为passed。同时检查data_audit.json中GoPro **train+val合计22**、test为11，DVD/BSD都完整；不要误要求内部train单独等于22。
+5. 四项回归测试和数据审计通过后，按原第4节选择空闲GPU，执行scripts/run_shift500.sh，继续两个模型的最大整帧预检和正式训练。不要停在prepare成功；发现其他实际阻塞则回报准确错误，不能自行改代码或关闭其他检查。
+
+回报：新commit、工作区状态、四项回归测试、split_audit.json的GoPro部分、三域clip数量，以及预检/正式训练是否已开始。没有新增人工数据整理操作。

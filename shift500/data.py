@@ -96,7 +96,9 @@ def discover(root, domain, split):
 
 
 def make_manifest(roots, seed=20260911, frames=16):
-    result = dict(version=1, seed=seed, frames=frames, roots=roots, train=[], val=[], test=[])
+    result = dict(version=2, seed=seed, frames=frames, roots=roots,
+                  split_policy='official clip train/test; acquisition-group holdout inside official train only',
+                  split_audit={}, train=[], val=[], test=[])
     for d in DOMAINS:
         records = discover(roots[d], d, 'train')
         if any(len(r['blur']) < frames for r in records):
@@ -109,8 +111,24 @@ def make_manifest(roots, seed=20260911, frames=16):
         for r in records:
             result['val' if r['group'] in holdout else 'train'].append(r)
         tests = discover(roots[d], d, 'test')
-        if set(r['group'] for r in records) & set(r['group'] for r in tests):
+        shared_clips = sorted(set(r['name'] for r in records) & set(r['name'] for r in tests))
+        if shared_clips:
+            raise ValueError(f'{d}: complete clip names overlap train/test: {shared_clips}')
+        shared_groups = sorted(set(r['group'] for r in records) & set(r['group'] for r in tests))
+        # Official GoPro splits different chunks of some acquisitions across
+        # train/test. Keep that benchmark partition; a shared acquisition label
+        # does not establish shared frames. Never move/drop official test clips.
+        # The holdout above still groups ONLY the official training clips.
+        if shared_groups and d != 'gopro':
             raise ValueError(f'{d}: acquisition names overlap train/test; inspect layout')
+        result['split_audit'][d] = {
+            'official_train_clips': len(records),
+            'official_test_clips': len(tests),
+            'official_train_test_shared_acquisitions': shared_groups,
+            'acquisition_overlap_policy': 'record_only_for_gopro' if d == 'gopro' else 'reject',
+            'train_val_holdout_groups': sorted(holdout),
+            'complete_clip_overlap_check': 'passed',
+        }
         result['test'] += tests
     # Content-level leakage check on GT, streaming hashes; no decoded images kept.
     seen = {}
@@ -121,6 +139,7 @@ def make_manifest(roots, seed=20260911, frames=16):
                 if digest in seen and seen[digest][0] != split:
                     raise ValueError(f'GT content leakage: {seen[digest]} versus {split}:{path}')
                 seen[digest] = (split, path)
+    result['split_audit']['gt_file_sha256_cross_split_check'] = 'passed'
     return result
 
 

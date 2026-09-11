@@ -24,7 +24,7 @@ quality空间通道9、UNet增量4；compact空间通道8、增量3。改变宽�
 
 180k updates/模型，每步4clips，GoPro/DVD/BSD=2/1/1，T16→12原生完整帧，全部阶段持续混合。log-MSE、质量掩码教师L1、GT相对帧差约束；无感知/GAN损失，PSNR优先。20k以后轻量时域项渐增；详细公式与权重在losses.py。
 
-10%官方train acquisition留出验证；test不参与训练、蒸馏、选checkpoint。按val GoPro选一个checkpoint，使用同一个模型跑三个测试域；balanced另存参考。数据root、manifest、teacher文件固定哈希，运行结果与checkpoint全在源码checkout外。
+10%官方train acquisition留出验证；该acquisition隔离规则只用于官方train内部的train/val。官方GoPro train/test按完整clip维持原始划分，允许不同chunk共享acquisition名称，并记录split_audit；完整clip重复和跨split GT文件SHA256重复仍阻塞。test不参与训练、蒸馏、选checkpoint。按val GoPro选一个checkpoint，使用同一个模型跑三个测试域；balanced另存参考。数据root、manifest、teacher文件固定哈希，运行结果与checkpoint全在源码checkout外。
 
 ## 算力口径
 
