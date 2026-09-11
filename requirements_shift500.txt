@@ -1,0 +1,4 @@
+# Reuse deblur_runtime PyTorch 2.2+ with CUDA. Do not replace server torch.
+numpy<2
+Pillow>=9
+pytest>=7
