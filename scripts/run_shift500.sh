@@ -9,7 +9,7 @@ IFS=',' read -r -a gpu_ids <<< "$CUDA_VISIBLE_DEVICES"
 world=${#gpu_ids[@]}
 if (( world < 1 || world > 2 )); then echo 'Use 1 or 2 GPUs'; exit 1; fi
 run=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["output"])' "$SHIFT500_CONFIG")
-# Preflight does an actual optimizer step on largest native frame per domain.
+# Preflight trains a shared 256 crop from the largest source frame per domain.
 # Those disposable weights are never reused by training.
 for variant in quality compact; do
     CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" python -m shift500.train --config "$SHIFT500_CONFIG" --variant "$variant" --preflight

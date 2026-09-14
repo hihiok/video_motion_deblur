@@ -154,12 +154,49 @@ def load_indices(record, indices):
             torch.stack([read_rgb(record['gt'][i]) for i in indices]))
 
 
+def load_training_clip(record, start, frames, crop_size, rng, augment=True):
+    """One shared crop for the entire temporal clip and all paired GT frames.
+
+    Crop before tensor construction: never stage full-frame clips on the GPU.
+    Spatial flips/90-degree rotation match upstream video_image_dataset.py.
+    """
+    if start < 0 or start + frames > len(record['blur']):
+        raise ValueError('Training clip crosses sequence boundary')
+    if crop_size:
+        h, w = record['height'], record['width']
+        if min(h, w) < crop_size:
+            raise ValueError(f'Image smaller than training crop: {record["name"]}')
+        left, top = rng.randrange(w - crop_size + 1), rng.randrange(h - crop_size + 1)
+        box = (left, top, left + crop_size, top + crop_size)
+        def read_crop(path):
+            with Image.open(path) as image:
+                if image.size != (w, h):
+                    raise ValueError(f'Image dimensions changed since data audit: {path}')
+                array = np.array(image.crop(box).convert('RGB'), dtype=np.float32) / 255.
+            return torch.from_numpy(array).permute(2, 0, 1)
+        x, y = [torch.stack([read_crop(record[key][i]) for i in range(start, start + frames)])
+                for key in ('blur', 'gt')]
+    else:
+        x, y = load_indices(record, range(start, start + frames))
+        box = (0, 0, x.shape[-1], x.shape[-2])
+    if augment:
+        if rng.random() < .5: x, y = x.flip(-1), y.flip(-1)
+        if rng.random() < .5: x, y = x.flip(-2), y.flip(-2)
+        if crop_size:
+            if rng.random() < .5: x, y = x.rot90(1, (-2, -1)), y.rot90(1, (-2, -1))
+        elif rng.random() < .5:
+            x, y = x.flip(0), y.flip(0)
+    return {'blur': x.contiguous(), 'gt': y.contiguous(), 'domain': record['domain'],
+            'crop_box': box, 'sequence': record['name']}
+
+
 class Clips(Dataset):
     # Exactly 2 GoPro, 1 DVD, 1 BSD clips per optimizer update across ranks.
     cycle = ('gopro','dvd','gopro','bsd')
-    def __init__(self, manifest, total, frames=16, seed=20260911):
+    def __init__(self, manifest, total, frames=16, seed=20260911, crop_size=0):
         self.records = {d:[r for r in manifest['train'] if r['domain']==d] for d in DOMAINS}
         self.total, self.frames, self.seed = total, frames, seed
+        self.crop_size = crop_size
     def __len__(self):
         return self.total
     def __getitem__(self, index):
@@ -167,8 +204,4 @@ class Clips(Dataset):
         domain = self.cycle[index%4]
         r = rng.choice(self.records[domain])
         start = rng.randrange(len(r['blur'])-self.frames+1)
-        x,y = load_indices(r,range(start,start+self.frames))
-        if rng.random()<.5: x,y=x.flip(-1),y.flip(-1)
-        if rng.random()<.5: x,y=x.flip(-2),y.flip(-2)
-        if rng.random()<.5: x,y=x.flip(0),y.flip(0)
-        return {'blur':x.contiguous(), 'gt':y.contiguous(), 'domain':domain}
+        return load_training_clip(r, start, self.frames, self.crop_size, rng)

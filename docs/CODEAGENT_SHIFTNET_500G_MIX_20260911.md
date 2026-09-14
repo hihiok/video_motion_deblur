@@ -1,3 +1,5 @@
+> **2026-09-14更新：用户已授权按原版改为256×256 crop、13帧输入/11帧训练输出。下面的整帧训练规则已被替代；恢复执行请使用 [CODEAGENT_SHIFT500_CROP256_T13_V2.md](CODEAGENT_SHIFT500_CROP256_T13_V2.md)。部署仍为完整画面16→12帧。Python3.9.23允许使用。**
+
 # CodeAgent：Shift-Net 压缩，1080p ≤500 GFLOPs，GoPro 目标35 dB，三数据集联合训练
 
 ## 目标、边界与已完成的工作

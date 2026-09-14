@@ -1,4 +1,4 @@
-"""One/two-GPU native-frame mixed-domain KD with resumable atomic checkpoints."""
+"""One/two-GPU crop-based mixed-domain KD with resumable atomic checkpoints."""
 import argparse
 from datetime import timedelta
 from contextlib import nullcontext
@@ -15,7 +15,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from .data import Clips, DOMAINS, load_indices, sha256
+from .data import Clips, DOMAINS, load_training_clip, sha256
+from .protocol import validate_training_settings, training_targets
 from .evaluate import evaluate
 from .losses import loss_terms
 from .model import ShiftModel, load_teacher, initialize_student
@@ -38,6 +39,7 @@ def worker_init(_):
 
 def train(a):
     c=json.loads(Path(a.config).read_text())
+    validate_training_settings(c)
     if sha256(c['manifest'])!=c['manifest_sha256'] or sha256(c['teacher_checkpoint'])!=c['teacher_sha256']:
         raise ValueError('Input provenance changed')
     rank=int(os.environ.get('RANK',0));world=int(os.environ.get('WORLD_SIZE',1))
@@ -48,7 +50,7 @@ def train(a):
     random.seed(c['seed']);np.random.seed(c['seed']);torch.manual_seed(c['seed']);torch.cuda.manual_seed_all(c['seed'])
     manifest=json.loads(Path(c['manifest']).read_text())
     out=Path(c['output'])/a.variant;out.mkdir(parents=True,exist_ok=True)
-    model=ShiftModel(c['upstream'],a.variant,activation_checkpointing=True).to(device)
+    model=ShiftModel(c['upstream'],a.variant,activation_checkpointing=True,training_context=c['training_context']).to(device)
     teacher=ShiftModel(c['upstream'],'teacher').to(device).eval().requires_grad_(False)
     load_teacher(teacher,c['teacher_checkpoint'])
     transfer=initialize_student(model,teacher)
@@ -69,19 +71,43 @@ def train(a):
         reports=[]
         for d in DOMAINS:
             r=max((r for r in manifest['train'] if r['domain']==d),key=lambda r:r['height']*r['width'])
-            x,y=load_indices(r,range(c['frames']));x=x[None].to(device);y=y[None,2:-2].to(device)
+            print(json.dumps({'preflight_phase':'crop_backward','domain':d,'sequence':r['name']}),flush=True)
+            sample=load_training_clip(r,0,c['frames'],c['crop_size'],random.Random(c['seed']),augment=False)
+            x=sample['blur'][None].to(device);y=training_targets(sample['gt'][None],c).to(device)
             torch.cuda.reset_peak_memory_stats();opt.zero_grad(set_to_none=True);t=time.monotonic()
             with torch.autocast('cuda',dtype=torch.bfloat16):
-                with torch.no_grad():target=teacher(x)
+                with torch.no_grad():target=teacher(x,context=c['training_context'])
                 pred=model(x);loss,terms=loss_terms(pred,y,target,0,total)
             loss.backward()
             if not torch.isfinite(loss) or not all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()):
                 raise RuntimeError('NONFINITE_PREFLIGHT')
             opt.step();torch.cuda.synchronize()
-            reports.append(dict(domain=d,sequence=r['name'],shape=list(x.shape),output_shape=list(pred.shape),
+            reports.append(dict(domain=d,sequence=r['name'],source_resolution=[r['height'],r['width']],crop_box=sample['crop_box'],
+                                shape=list(x.shape),output_shape=list(pred.shape),
                                 seconds=time.monotonic()-t,peak_GiB=torch.cuda.max_memory_allocated()/2**30))
+            print(json.dumps(reports[-1]),flush=True)
+            (out/'preflight_progress.json').write_text(json.dumps({'training_recipe':c['training_recipe'],'crop_reports':reports},indent=2)+'\n')
             del x,y,pred,target,loss,terms
-        (out/'preflight.json').write_text(json.dumps({'status':'PASS','config_sha256':sha256(a.config),'reports':reports},indent=2)+'\n')
+        # Separately verify deployment forward memory. A training crop is not
+        # evidence that native 1080p inference fits. No full-frame backward here.
+        inference_reports=[]
+        r=max(manifest['train']+manifest['val']+manifest['test'],key=lambda r:r['height']*r['width'])
+        opt.zero_grad(set_to_none=True)
+        for label,network in (('teacher',teacher),(a.variant,model)):
+            print(json.dumps({'preflight_phase':'native_inference','model':label,'height':r['height'],'width':r['width']}),flush=True)
+            was_training=network.training;network.eval()
+            torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats()
+            with torch.inference_mode(),torch.autocast('cuda',dtype=torch.float16):
+                x=torch.zeros(1,16,3,r['height'],r['width'],device=device)
+                pred=network(x)
+                if pred.shape != (1,12,3,r['height'],r['width']) or not torch.isfinite(pred).all():
+                    raise RuntimeError('NATIVE_INFERENCE_PREFLIGHT_FAILED')
+                inference_reports.append(dict(model=label,shape=list(x.shape),output_shape=list(pred.shape),
+                                               peak_GiB=torch.cuda.max_memory_allocated()/2**30))
+                del x,pred
+            network.train(was_training)
+        (out/'preflight.json').write_text(json.dumps({'status':'PASS','config_sha256':sha256(a.config),
+            'training_recipe':c['training_recipe'],'reports':reports,'native_inference':inference_reports},indent=2)+'\n')
         print(json.dumps(reports,indent=2));return
     gate=out/'preflight.json'
     if not gate.exists() or json.loads(gate.read_text()).get('config_sha256')!=sha256(a.config):
@@ -91,7 +117,7 @@ def train(a):
     accum=c['clips_per_update']//world
     end=total if not a.stop_after else min(total,start+a.stop_after)
     indices=range(start*4+rank,end*4,world)
-    dataset=Clips(manifest,total*4,c['frames'],c['seed'])
+    dataset=Clips(manifest,total*4,c['frames'],c['seed'],crop_size=c['crop_size'])
     loader=iter(DataLoader(dataset,batch_size=1,sampler=indices,num_workers=c['workers'],pin_memory=True,
                            worker_init_fn=worker_init,**({'prefetch_factor':1} if c['workers'] else {})))
     signal.signal(signal.SIGTERM,request_stop);signal.signal(signal.SIGINT,request_stop)
@@ -108,11 +134,11 @@ def train(a):
         for group in opt.param_groups:group['lr']=lr
         opt.zero_grad(set_to_none=True);meter={}
         for micro in range(accum):
-            batch=next(loader);x=batch['blur'].to(device,non_blocking=True);gt=batch['gt'][:,2:-2].to(device,non_blocking=True)
+            batch=next(loader);x=batch['blur'].to(device,non_blocking=True);gt=training_targets(batch['gt'],c).to(device,non_blocking=True)
             sync=model.no_sync() if world>1 and micro<accum-1 else nullcontext()
             with sync:
                 with torch.autocast('cuda',dtype=torch.bfloat16):
-                    with torch.no_grad():target=teacher(x)
+                    with torch.no_grad():target=teacher(x,context=c['training_context'])
                     pred=model(x);loss,terms=loss_terms(pred,gt,target,step,total)
                 finite=torch.tensor(int(torch.isfinite(loss)),device=device)
                 if world>1:dist.all_reduce(finite,op=dist.ReduceOp.MIN)

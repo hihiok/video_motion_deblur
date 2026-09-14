@@ -1,3 +1,5 @@
+> **2026-09-14更新：用户已授权按原版改为256×256 crop、13帧输入/11帧训练输出。下面的整帧训练规则已被替代；恢复执行请使用 [CODEAGENT_SHIFT500_CROP256_T13_V2.md](CODEAGENT_SHIFT500_CROP256_T13_V2.md)。部署仍为完整画面16→12帧。Python3.9.23允许使用。**
+
 # Shift-Net三域压缩实验设计
 
 目标：1080p每输出帧≤500 GFLOPs，GoPro test约35dB，同时训练GoPro、DVD、BSD。质量目标待实测。

@@ -41,9 +41,10 @@ class Bypass(nn.Module):
 
 
 class ShiftModel(nn.Module):
-    def __init__(self, upstream, variant='quality', activation_checkpointing=False, widths=None):
+    def __init__(self, upstream, variant='quality', activation_checkpointing=False, widths=None, training_context=2):
         super().__init__()
         self.variant = variant
+        self.training_context = training_context
         self.widths = tuple(widths or VARIANTS[variant])
         mod = load_upstream(upstream, self.widths)
         self.net = mod.GShiftNet(future_frames=2, past_frames=2)
@@ -73,15 +74,25 @@ class ShiftModel(nn.Module):
                         return _forward(*args, **kwargs)
                     child.forward = wrapped
 
-    def forward(self, x):
-        if x.ndim != 5 or x.shape[0] != 1 or x.shape[1] < 5:
-            raise ValueError('Expected [1,T>=5,3,H,W]; upstream supports batch=1 only')
+    def forward(self, x, context=None):
+        # Official training uses one boundary frame per side (13 -> 11).
+        # Official inference uses two per side; deployment remains 16 -> 12.
+        context = (self.training_context if self.training else 2) if context is None else context
+        if context not in (1, 2):
+            raise ValueError('Temporal output context must be 1 or 2')
+        if x.ndim != 5 or x.shape[0] != 1 or x.shape[1] <= 2 * context:
+            raise ValueError('Expected batch=1 and T>2*context')
         h, w = x.shape[-2:]
         if min(h, w) < 32:
             raise ValueError('Spatial shift requires dimensions >=32')
         pad_h, pad_w = (-h) % 4, (-w) % 4
         flat = F.pad(x[0], (0, pad_w, 0, pad_h), mode='replicate')
-        return self.net(flat.unsqueeze(0))[..., :h, :w].unsqueeze(0)
+        previous = self.net.num_fb, self.net.num_ff
+        self.net.num_fb = self.net.num_ff = context
+        try:
+            return self.net(flat.unsqueeze(0))[..., :h, :w].unsqueeze(0)
+        finally:
+            self.net.num_fb, self.net.num_ff = previous
 
 
 def checkpoint_state(path):

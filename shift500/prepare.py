@@ -5,6 +5,7 @@ from pathlib import Path
 from .data import ALIASES, DOMAINS, make_manifest, sha256
 from .model import ShiftModel, load_teacher
 from .profile import profile
+from .protocol import training_settings
 
 
 def main():
@@ -27,17 +28,19 @@ def main():
     reports={v:profile(a.upstream,v) for v in ('teacher','quality','compact')}
     for v in ('quality','compact'):
         if reports[v]['arithmetic_GFLOPs_per_output']>500:raise ValueError(f'{v}: budget exceeded')
-    manifest=make_manifest(roots)
+    manifest=make_manifest(roots,frames=13)
+    for r in manifest['train']:
+        if min(r['height'],r['width'])<256:raise ValueError(f'Training image smaller than crop: {r["name"]}')
     run.mkdir(parents=True,exist_ok=True)
     mp=run/'manifest.json';mp.write_text(json.dumps(manifest,indent=2)+'\n')
     for v,r in reports.items():(run/f'profile_{v}.json').write_text(json.dumps(r,indent=2)+'\n')
     config=dict(upstream=str(Path(a.upstream).resolve()),teacher_checkpoint=str(Path(a.teacher_checkpoint).resolve()),
                 teacher_sha256=sha256(a.teacher_checkpoint),manifest=str(mp),manifest_sha256=sha256(mp),
-                output=str(run),seed=20260911,frames=16,clips_per_update=4,total_updates=180000,
+                output=str(run),seed=20260911,clips_per_update=4,total_updates=180000,
                 lr=0.0002,min_lr=0.000002,warmup_updates=2000,validate_every=5000,save_every=1000,
                 workers=2,validation_windows_per_sequence=3,
-                training_spatial_mode='native_full_frame_no_crop_no_resize',
                 domain_sampling={'gopro':.5,'dvd':.25,'bsd':.25})
+    config.update(training_settings())
     (run/'config.json').write_text(json.dumps(config,indent=2)+'\n')
     summary={s:{d:{'sequences':sum(r['domain']==d for r in manifest[s]),
                      'frames':sum(len(r['blur']) for r in manifest[s] if r['domain']==d),
