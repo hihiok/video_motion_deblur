@@ -1,4 +1,5 @@
 """Strict split discovery, acquisition-disjoint holdout, native full-frame clips."""
+from bisect import bisect_right
 import hashlib
 import json
 import random
@@ -191,17 +192,41 @@ def load_training_clip(record, start, frames, crop_size, rng, augment=True):
 
 
 class Clips(Dataset):
-    # Exactly 2 GoPro, 1 DVD, 1 BSD clips per optimizer update across ranks.
+    # Repeat twice per global batch of eight: GoPro4/DVD2/BSD2.
     cycle = ('gopro','dvd','gopro','bsd')
-    def __init__(self, manifest, total, frames=16, seed=20260911, crop_size=0):
+    def __init__(self, manifest, total, frames=16, seed=20260911, crop_size=0,
+                 n_frames_per_video=None):
         self.records = {d:[r for r in manifest['train'] if r['domain']==d] for d in DOMAINS}
         self.total, self.frames, self.seed = total, frames, seed
         self.crop_size = crop_size
+        self.ends={};self.orders={}
+        for d,records in self.records.items():
+            ends=[];count=0
+            for r in records:
+                n=len(r['blur']) if n_frames_per_video is None else min(n_frames_per_video,len(r['blur']))
+                if n<frames:raise ValueError('Training sequence too short')
+                count+=n-frames+1;ends.append(count)
+            if not count:raise ValueError(f'Empty training domain: {d}')
+            self.ends[d]=ends
+
     def __len__(self):
         return self.total
+
+    def locate(self,index):
+        domain=self.cycle[index%4]
+        occurrence=index//2 if domain=='gopro' else index//4
+        count=self.ends[domain][-1]
+        epoch,position=divmod(occurrence,count)
+        if self.orders.get(domain,(-1,None))[0]!=epoch:
+            order=list(range(count))
+            random.Random(self.seed+epoch*9176+sum(map(ord,domain))).shuffle(order)
+            self.orders[domain]=(epoch,order)
+        window=self.orders[domain][1][position]
+        record=bisect_right(self.ends[domain],window)
+        start=window-(self.ends[domain][record-1] if record else 0)
+        return domain,self.records[domain][record],start
+
     def __getitem__(self, index):
         rng = random.Random(self.seed+int(index)*9176)
-        domain = self.cycle[index%4]
-        r = rng.choice(self.records[domain])
-        start = rng.randrange(len(r['blur'])-self.frames+1)
+        domain,r,start=self.locate(index)
         return load_training_clip(r, start, self.frames, self.crop_size, rng)

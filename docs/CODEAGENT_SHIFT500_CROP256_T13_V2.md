@@ -1,3 +1,5 @@
+> **已被 V3 替代：用户要求整个训练配方尽量对齐官方。请只执行 [CODEAGENT_SHIFT500_OFFICIAL_RECIPE_V3.md](CODEAGENT_SHIFT500_OFFICIAL_RECIPE_V3.md)。下文仅保留历史，不再执行 KD、180k 或旧 run。**
+
 # CodeAgent：按官方Shift-Net-s输入方式恢复训练（crop256、T13）
 
 ## 本次用户授权与执行目标

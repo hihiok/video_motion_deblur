@@ -1,11 +1,10 @@
-"""Create a new crop run from the already-audited full-frame config; keep old run."""
+"""Create a fresh official-recipe run from an audited config; preserve source run."""
 import argparse
-import copy
 import json
 from pathlib import Path
 from .data import sha256
 from .profile import profile
-from .protocol import training_settings
+from .protocol import training_settings, official_training_partition
 
 
 def migrate(source_config, output):
@@ -25,15 +24,15 @@ def migrate(source_config, output):
     old_manifest = json.loads(Path(c['manifest']).read_text())
     if old_manifest.get('split_audit', {}).get('gt_file_sha256_cross_split_check') != 'passed':
         raise ValueError('Need the successful audited manifest from the GoPro split fix')
-    for r in old_manifest['train']:
+    manifest = official_training_partition(old_manifest)
+    for r in manifest['train']:
         if len(r['blur']) < 13 or min(r['height'], r['width']) < 256:
             raise ValueError(f'Clip too short or smaller than crop: {r["name"]}')
     profiles = {v:profile(c['upstream'],v) for v in ('teacher','quality','compact')}
     for v in ('quality','compact'):
         if profiles[v]['arithmetic_GFLOPs_per_output'] > 500:
             raise ValueError(f'Deployment budget exceeded: {v}')
-    manifest = copy.deepcopy(old_manifest)
-    manifest.update(version=3, frames=13, parent_manifest_sha256=c['manifest_sha256'])
+    manifest.update(parent_manifest_sha256=c['manifest_sha256'])
     mp = run / 'manifest.json'
     c.update(training_settings())
     c.update(output=str(run), manifest=str(mp), migrated_from_config=str(source),
@@ -47,11 +46,15 @@ def migrate(source_config, output):
     summary = {s:{d:{'sequences':sum(r['domain']==d for r in manifest[s]),
                       'frames':sum(len(r['blur']) for r in manifest[s] if r['domain']==d)}
                    for d in ('gopro','dvd','bsd')} for s in ('train','val','test')}
+    for d in ('gopro','dvd','bsd'):
+        records=[r for r in manifest['train'] if r['domain']==d]
+        summary['train'][d]['eligible_training_frames']=sum(min(100,len(r['blur'])) for r in records)
+        summary['train'][d]['eligible_training_windows']=sum(min(100,len(r['blur']))-12 for r in records)
     (run/'data_audit.json').write_text(json.dumps(summary,indent=2)+'\n')
     # Config is written last so it marks a completed preparation.
     (run/'config.json').write_text(json.dumps(c,indent=2)+'\n')
     print(json.dumps({'config':str(run/'config.json'),'training':training_settings(),
-                      'source_splits_preserved':True,'teacher_sha256':c['teacher_sha256']},indent=2))
+                      'official_train_test_preserved':True, 'internal_holdout_merged_into_train':True,'teacher_sha256':c['teacher_sha256']},indent=2))
     return c
 
 

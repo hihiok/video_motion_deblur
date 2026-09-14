@@ -32,8 +32,8 @@ def test_gradient_and_checkpoint_equivalence(variant):
     x=torch.rand(1,7,3,35,41);gt=torch.rand(1,3,3,35,41)
     ya=a(x);yb=b(x)
     torch.testing.assert_close(ya,yb)
-    loss,_=loss_terms(ya,gt,gt,30000,180000);loss.backward()
-    loss2,_=loss_terms(yb,gt,gt,30000,180000);loss2.backward()
+    loss,_=loss_terms(ya,gt);loss.backward()
+    loss2,_=loss_terms(yb,gt);loss2.backward()
     for pa,pb in zip(a.parameters(),b.parameters()):
         if pa.grad is None:pytest.fail('Unused trainable parameter would break DDP')
         else:

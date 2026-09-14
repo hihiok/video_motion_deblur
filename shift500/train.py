@@ -1,9 +1,8 @@
-"""One/two-GPU crop-based mixed-domain KD with resumable atomic checkpoints."""
+"""One/two-GPU upstream-recipe mixed-domain training with resumable atomic checkpoints."""
 import argparse
 from datetime import timedelta
 from contextlib import nullcontext
 import json
-import math
 import os
 from pathlib import Path
 import random
@@ -16,10 +15,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from .data import Clips, DOMAINS, load_training_clip, sha256
-from .protocol import validate_training_settings, training_targets
-from .evaluate import evaluate
+from .protocol import validate_training_settings, training_targets, learning_rate
 from .losses import loss_terms
-from .model import ShiftModel, load_teacher, initialize_student
+from .model import ShiftModel
 
 STOP=False
 
@@ -40,7 +38,7 @@ def worker_init(_):
 def train(a):
     c=json.loads(Path(a.config).read_text())
     validate_training_settings(c)
-    if sha256(c['manifest'])!=c['manifest_sha256'] or sha256(c['teacher_checkpoint'])!=c['teacher_sha256']:
+    if sha256(c['manifest'])!=c['manifest_sha256']:
         raise ValueError('Input provenance changed')
     rank=int(os.environ.get('RANK',0));world=int(os.environ.get('WORLD_SIZE',1))
     local=int(os.environ.get('LOCAL_RANK',0))
@@ -51,17 +49,17 @@ def train(a):
     manifest=json.loads(Path(c['manifest']).read_text())
     out=Path(c['output'])/a.variant;out.mkdir(parents=True,exist_ok=True)
     model=ShiftModel(c['upstream'],a.variant,activation_checkpointing=True,training_context=c['training_context']).to(device)
-    teacher=ShiftModel(c['upstream'],'teacher').to(device).eval().requires_grad_(False)
-    load_teacher(teacher,c['teacher_checkpoint'])
-    transfer=initialize_student(model,teacher)
+    transfer={'method':'random','seed':c['seed'],'teacher_weights_loaded':False}
     opt=torch.optim.AdamW(model.parameters(),lr=c['lr'],betas=(.9,.99),weight_decay=0)
-    start=0;best={'gopro':-float('inf'),'balanced':-float('inf')}
+    scaler=torch.cuda.amp.GradScaler()
+    start=0; amp_skipped_total=0
     resume=Path(a.resume) if a.resume else out/'latest.pth'
     if resume.exists() and not a.preflight:
         state=torch.load(resume,map_location='cpu',weights_only=False)
         if state['variant']!=a.variant or state['config']!=c:raise ValueError('Resume provenance/config mismatch')
         model.load_state_dict(state['model'],strict=True);opt.load_state_dict(state['optimizer'])
-        start=state['update'];best=state['best']
+        scaler.load_state_dict(state['scaler'])
+        start=state['update'];amp_skipped_total=state['amp_skipped_total']
     elif a.resume and not a.preflight:
         raise FileNotFoundError(a.resume)
     if rank==0:(out/'initialization.json').write_text(json.dumps(transfer,indent=2)+'\n')
@@ -73,27 +71,36 @@ def train(a):
             r=max((r for r in manifest['train'] if r['domain']==d),key=lambda r:r['height']*r['width'])
             print(json.dumps({'preflight_phase':'crop_backward','domain':d,'sequence':r['name']}),flush=True)
             sample=load_training_clip(r,0,c['frames'],c['crop_size'],random.Random(c['seed']),augment=False)
-            x=sample['blur'][None].to(device);y=training_targets(sample['gt'][None],c).to(device)
+            x=sample['blur'][None].to(device).half();y=training_targets(sample['gt'][None],c).to(device)
             torch.cuda.reset_peak_memory_stats();opt.zero_grad(set_to_none=True);t=time.monotonic()
-            with torch.autocast('cuda',dtype=torch.bfloat16):
-                with torch.no_grad():target=teacher(x,context=c['training_context'])
-                pred=model(x);loss,terms=loss_terms(pred,y,target,0,total)
-            loss.backward()
-            if not torch.isfinite(loss) or not all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()):
-                raise RuntimeError('NONFINITE_PREFLIGHT')
-            opt.step();torch.cuda.synchronize()
+            # An initial FP16 scale overflow is recoverable, as in upstream.
+            # Require an actual finite optimizer step before declaring PASS.
+            for attempt in range(10):
+                opt.zero_grad(set_to_none=True)
+                with torch.autocast('cuda',dtype=torch.float16):
+                    pred=model(x);loss,terms=loss_terms(pred,y)
+                if not torch.isfinite(loss):raise RuntimeError('NONFINITE_PREFLIGHT_LOSS')
+                scaler.scale(loss).backward();scaler.unscale_(opt)
+                norm=torch.nn.utils.clip_grad_norm_(model.parameters(),c['grad_clip'])
+                finite=bool(torch.isfinite(norm))
+                scaler.step(opt);scaler.update()
+                if finite:break
+                del pred,loss,terms
+            else:raise RuntimeError('NONFINITE_PREFLIGHT_GRAD_AFTER_SCALE_BACKOFF')
+            torch.cuda.synchronize()
             reports.append(dict(domain=d,sequence=r['name'],source_resolution=[r['height'],r['width']],crop_box=sample['crop_box'],
                                 shape=list(x.shape),output_shape=list(pred.shape),
+                                amp_scale=scaler.get_scale(),scale_backoffs=attempt,
                                 seconds=time.monotonic()-t,peak_GiB=torch.cuda.max_memory_allocated()/2**30))
             print(json.dumps(reports[-1]),flush=True)
             (out/'preflight_progress.json').write_text(json.dumps({'training_recipe':c['training_recipe'],'crop_reports':reports},indent=2)+'\n')
-            del x,y,pred,target,loss,terms
+            del x,y,pred,loss,terms
         # Separately verify deployment forward memory. A training crop is not
         # evidence that native 1080p inference fits. No full-frame backward here.
         inference_reports=[]
         r=max(manifest['train']+manifest['val']+manifest['test'],key=lambda r:r['height']*r['width'])
         opt.zero_grad(set_to_none=True)
-        for label,network in (('teacher',teacher),(a.variant,model)):
+        for label,network in ((a.variant,model),):
             print(json.dumps({'preflight_phase':'native_inference','model':label,'height':r['height'],'width':r['width']}),flush=True)
             was_training=network.training;network.eval()
             torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats()
@@ -110,14 +117,15 @@ def train(a):
             'training_recipe':c['training_recipe'],'reports':reports,'native_inference':inference_reports},indent=2)+'\n')
         print(json.dumps(reports,indent=2));return
     gate=out/'preflight.json'
-    if not gate.exists() or json.loads(gate.read_text()).get('config_sha256')!=sha256(a.config):
+    if not gate.exists() or json.loads(gate.read_text()).get('status')!='PASS' or json.loads(gate.read_text()).get('config_sha256')!=sha256(a.config):
         raise ValueError('Run this variant preflight first')
     if world>1:model=DDP(model,device_ids=[local],broadcast_buffers=False)
     raw=model.module if world>1 else model
     accum=c['clips_per_update']//world
     end=total if not a.stop_after else min(total,start+a.stop_after)
-    indices=range(start*4+rank,end*4,world)
-    dataset=Clips(manifest,total*4,c['frames'],c['seed'],crop_size=c['crop_size'])
+    indices=range(start*c['clips_per_update']+rank,end*c['clips_per_update'],world)
+    dataset=Clips(manifest,total*c['clips_per_update'],c['frames'],c['seed'],crop_size=c['crop_size'],
+                  n_frames_per_video=c['n_frames_per_video'])
     loader=iter(DataLoader(dataset,batch_size=1,sampler=indices,num_workers=c['workers'],pin_memory=True,
                            worker_init_fn=worker_init,**({'prefetch_factor':1} if c['workers'] else {})))
     signal.signal(signal.SIGTERM,request_stop);signal.signal(signal.SIGINT,request_stop)
@@ -125,51 +133,42 @@ def train(a):
     def save(update,filename='latest.pth'):
         if rank==0:
             atomic_save({'model':raw.state_dict(),'optimizer':opt.state_dict(),'update':update,
-                         'best':best,'variant':a.variant,'config':c,
+                         'scaler':scaler.state_dict(),'amp_skipped_total':amp_skipped_total,'variant':a.variant,'config':c,
                          'git_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()},out/filename)
     for step in range(start,end):
-        progress=max(0,(step-c['warmup_updates'])/max(1,total-c['warmup_updates']))
-        lr=c['min_lr']+(c['lr']-c['min_lr'])*.5*(1+math.cos(math.pi*progress))
-        lr*=min(1,(step+1)/c['warmup_updates'])
+        lr=learning_rate(step,c)
         for group in opt.param_groups:group['lr']=lr
         opt.zero_grad(set_to_none=True);meter={}
         for micro in range(accum):
-            batch=next(loader);x=batch['blur'].to(device,non_blocking=True);gt=training_targets(batch['gt'],c).to(device,non_blocking=True)
+            batch=next(loader);x=batch['blur'].to(device,non_blocking=True).half();gt=training_targets(batch['gt'],c).to(device,non_blocking=True)
             sync=model.no_sync() if world>1 and micro<accum-1 else nullcontext()
             with sync:
-                with torch.autocast('cuda',dtype=torch.bfloat16):
-                    with torch.no_grad():target=teacher(x,context=c['training_context'])
-                    pred=model(x);loss,terms=loss_terms(pred,gt,target,step,total)
+                with torch.autocast('cuda',dtype=torch.float16):
+                    pred=model(x);loss,terms=loss_terms(pred,gt)
                 finite=torch.tensor(int(torch.isfinite(loss)),device=device)
                 if world>1:dist.all_reduce(finite,op=dist.ReduceOp.MIN)
                 if not finite.item():raise RuntimeError('NONFINITE_LOSS; resume last valid checkpoint')
-                (loss/accum).backward()
+                scaler.scale(loss/accum).backward()
             for k,v in terms.items():meter[k]=meter.get(k,0.)+v.item()/accum
-            del x,gt,pred,target,loss,terms,batch
-        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
-        if not torch.isfinite(norm):raise RuntimeError('NONFINITE_GRAD; resume last valid checkpoint')
-        opt.step();update=step+1
+            del x,gt,pred,loss,terms,batch
+        scaler.unscale_(opt)
+        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),c['grad_clip'])
+        # Upstream AMP skips overflowing updates and adjusts the scale.
+        scale_before=scaler.get_scale()
+        scaler.step(opt);scaler.update();update=step+1
+        amp_skipped=scaler.get_scale()<scale_before
+        amp_skipped_total+=int(amp_skipped)
         if update%20==0 or update==start+1:
             if world>1:
                 values=torch.tensor(list(meter.values()),device=device)
                 dist.all_reduce(values);values/=world
                 meter=dict(zip(meter,values.tolist()))
         if rank==0 and (update%20==0 or update==start+1):
-            row=dict(update=update,total=total,lr=lr,grad_norm=norm.item(),
+            row=dict(update=update,total=total,lr=lr,grad_norm=norm.item() if torch.isfinite(norm) else None,
+                     amp_scale=scaler.get_scale(),amp_skipped=amp_skipped,amp_skipped_total=amp_skipped_total,
                      seconds_per_update=(time.monotonic()-began)/(update-start),**meter)
             print(json.dumps(row),flush=True)
             with open(out/'training.jsonl','a') as f:f.write(json.dumps(row)+'\n')
-        if update%c['validate_every']==0 or update==total:
-            if world>1:dist.barrier()
-            if rank==0:
-                result=evaluate(raw,manifest['val'],device,max_windows=c['validation_windows_per_sequence'])
-                (out/f'val_{update:06d}.json').write_text(json.dumps(result,indent=2)+'\n')
-                metrics=result['summary'];scores={'gopro':metrics['gopro']['psnr'],
-                         'balanced':sum(metrics[d]['psnr'] for d in DOMAINS)/3}
-                for key,value in scores.items():
-                    if value>best[key]:best[key]=value;save(update,f'best_{key}.pth')
-                print(json.dumps({'validation':update,'scores':metrics}),flush=True)
-            if world>1:dist.barrier()
         stop=torch.tensor(int(STOP),device=device)
         if world>1:dist.all_reduce(stop,op=dist.ReduceOp.MAX)
         if update%c['save_every']==0 or update==end or stop.item():save(update)

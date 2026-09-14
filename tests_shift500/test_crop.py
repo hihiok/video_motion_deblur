@@ -70,7 +70,7 @@ def test_official_train_13_to_11_and_eval_16_to_12(tmp_path):
 
 
 def test_old_config_cannot_satisfy_crop_gate():
-    with pytest.raises(ValueError,match='prepare_crop'):
+    with pytest.raises(ValueError,match='prepare_official'):
         validate_training_settings({'frames':16,'training_spatial_mode':'native_full_frame_no_crop_no_resize'})
     validate_training_settings(training_settings())
 
@@ -90,7 +90,7 @@ def test_migration_preserves_audited_data_and_old_config(record,tmp_path):
     nm=json.loads(Path(new['manifest']).read_text())
     assert all(nm[s]==manifest[s] for s in ('train','val','test'))
     assert new['frames']==13 and new['crop_size']==256 and new['training_context']==1
-    assert new['teacher_sha256']==c['teacher_sha256'] and new['total_updates']==180000
+    assert new['teacher_sha256']==c['teacher_sha256'] and new['total_updates']==300000
     with pytest.raises(FileExistsError):migrate(cp,tmp_path/'crop')
 
 

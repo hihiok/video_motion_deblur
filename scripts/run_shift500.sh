@@ -14,11 +14,9 @@ run=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["output"])'
 for variant in quality compact; do
     CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" python -m shift500.train --config "$SHIFT500_CONFIG" --variant "$variant" --preflight
  done
-# Fixed holdout reference; test data are not used for checkpoint selection.
-CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" python -m shift500.evaluate --config "$SHIFT500_CONFIG" --variant teacher --split val --max-windows 3 --output "$run/val_teacher.json"
 for variant in quality compact; do
     python -m torch.distributed.run --standalone --nproc_per_node="$world" -m shift500.train --config "$SHIFT500_CONFIG" --variant "$variant" 2>&1 | tee -a "$run/$variant/console.log"
-    CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" python -m shift500.evaluate --config "$SHIFT500_CONFIG" --variant "$variant" --checkpoint "$run/$variant/best_gopro.pth" --output "$run/test_$variant.json"
+    CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" python -m shift500.evaluate --config "$SHIFT500_CONFIG" --variant "$variant" --checkpoint "$run/$variant/latest.pth" --output "$run/test_$variant.json"
 done
 CUDA_VISIBLE_DEVICES="${gpu_ids[0]}" python -m shift500.evaluate --config "$SHIFT500_CONFIG" --variant teacher --output "$run/test_teacher.json"
 python -m shift500.report --run "$run"
