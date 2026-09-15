@@ -25,6 +25,8 @@ def git_head(path):
 def verify_config(c):
     if c['architecture']!=ARCHITECTURE or c['world_size']!=2 or c['accumulate']!=4 or c['frames']!=6:
         raise ValueError('Recipe mismatch; no automatic architecture/batch/T changes')
+    if c.get('train_mix')!='GoPro6 / DVD1 / BSD3ms24ms1 throughout all 100000 updates':
+        raise ValueError('Old sampling config: all updates must use all three datasets; preserve old run for migration')
     if sha256(c['manifest'])!=c['manifest_sha256']: raise ValueError('Manifest changed')
     if sha256(c['teacher_checkpoint'])!=c['teacher_sha256']: raise ValueError('Teacher changed')
     if git_head(c['upstream'])!=UPSTREAM_COMMIT: raise ValueError('Upstream commit changed')
@@ -45,7 +47,7 @@ def configure(args):
        'total_updates':100000,'distill_updates':80000,'validate_every':5000,'save_every':1000,
        'lr':.0001,'min_lr':.000001,'seed':20260915,'precision':'BF16_AMP',
        'crop_size':0,'resize':False,'spatial_tiling':False,
-       'train_mix':'GoPro6 / DVD1 / BSD3ms24ms1; final20k GoPro only',
+       'train_mix':'GoPro6 / DVD1 / BSD3ms24ms1 throughout all 100000 updates',
        'target':'full GoPro test1111 RGB8 PSNR >=33; <=500 GFLOPs/native1080p output',
        'output':str(Path(args.output).resolve())}
     manifest=verify_config(c)
@@ -171,14 +173,14 @@ def train(args):
         class Batches:
             def __len__(self): return 4
             def __iter__(self):
-                for micro in range(4): yield sample(manifest,update,micro,rank,final)
+                for micro in range(4): yield sample(manifest,update,micro,rank)
         value,norm=step(ddp,t,opt,Batches(),device,lr,kd)
         done=update+1
         if rank==0 and (done%50==0 or done==begin+1):
             seconds=(time.perf_counter()-started)/(done-begin)
             info={'update':done,'total':c['total_updates'],'loss':value,'grad_norm':norm,'lr':lr,
                   'seconds_per_update_including_validation':seconds,'eta_hours':seconds*(c['total_updates']-done)/3600,
-                  'phase':'gopro_refine' if final else 'mixed_distill'}
+                  'phase':'mixed_refine' if final else 'mixed_distill'}
             print(json.dumps(info),flush=True)
             with (out/'training.jsonl').open('a') as f:f.write(json.dumps(info)+'\n')
         if done%c['validate_every']==0 or done==c['total_updates']:

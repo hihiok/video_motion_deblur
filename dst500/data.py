@@ -52,9 +52,9 @@ def build_manifest(roots, frames=6):
     return out
 
 
-def sample(manifest, update, micro, rank, final_phase=False):
+def sample(manifest, update, micro, rank):
     index=update*8+micro*2+rank
-    domain='gopro' if final_phase else CYCLE[index%8]
+    domain=CYCLE[index%8]
     records=[r for r in manifest['train'] if r['domain']==domain]
     rng=random.Random(20260915+index*9176)
     # Weight by valid windows, not number of sequences.
