@@ -2,12 +2,27 @@
 
 本任务独立于旧 Shift500 quality/compact 和 DSTNet 压缩任务。本文件是本分支的唯一训练入口；不要执行继承目录里旧任务书的停训练、加到4/8卡、quality/compact两轮训练等指令。
 
+## 等比例更新（V2）
+
+用户最新要求：三个域严格平均，GoPro:DVD:BSD=1:1:1。每次更新各2 clips，全局batch6；两张卡每卡依次读取三个域各1 clip，累积3次。已新增3项等比例及checkpoint迁移测试并通过。120k更新、LR、loss和网络保持原值。新的每次更新样本数由8变6，因此不承诺与旧配方优化轨迹等价。
+
+旧配置是4:2:2，不能直接复用：使用本文件新的equal checkout/run。若旧ShiftWave没有启动，直接从官方预训练初始化。若旧ShiftWave已在训练，只对确认属于该ShiftWave run的launcher及trainer做温和停止，等待latest保存（不影响旧Shift500或其他任务）。在新的checkout里使用下列迁移命令，保留权重/optimizer/scaler/update，从该进度继续等比例采样；此前已完成的更新仍属于旧比例，报告中必须注明。
+
+```bash
+python -m shiftwave.prepare \
+  --from-config /data/pub/z00919662/motion_deblur/runs/shiftwave_500g_2gpu_v1/config.json \
+  --run /data/pub/z00919662/motion_deblur/runs/shiftwave_500g_equal_2gpu_v2 \
+  --continue-checkpoint /data/pub/z00919662/motion_deblur/runs/shiftwave_500g_2gpu_v1/student/latest.pth
+```
+
+此命令在完成下面环境/proxy及下载步骤后执行，只接受尚未完成的ShiftWave checkpoint，不接受quality/compact权重。迁移成功后跳过第2节prepare创建，直接复用新config。原run及checkpoint全部保留；禁止直接改旧config以绕过resume校验。
+
 ## 目标和授权
 
 - 仓库：https://github.com/hihiok/video_motion_deblur
 - 分支：`agent/shiftnet-waveshift-pagf-500g-v1`
-- 新 checkout：`/data/pub/z00919662/motion_deblur/shiftwave_500g_code_v1`
-- 新 run：`/data/pub/z00919662/motion_deblur/runs/shiftwave_500g_2gpu_v1`
+- 新 checkout：`/data/pub/z00919662/motion_deblur/shiftwave_500g_equal_code_v2`
+- 新 run：`/data/pub/z00919662/motion_deblur/runs/shiftwave_500g_equal_2gpu_v2`
 - 环境：复用 `deblur_runtime`，兼容 Python 3.9 / PyTorch 2.2.2 / CUDA 11.8；不替换现有 torch。
 - **只用两张确认空闲的 A100-80GB 做 DDP 训练。** 不停止其他任务，不复用旧任务的 checkout 或输出目录。
 - 只训练 student 一种架构，无消融；teacher 固定参数，仅推理，不训练第二个模型。
@@ -55,8 +70,8 @@ export GIT_SSL_NO_VERIFY=true
 export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2
 export PYTHONUNBUFFERED=1 CUDA_DEVICE_ORDER=PCI_BUS_ID
 DEBLUR_ROOT=/data/pub/z00919662/motion_deblur
-SHIFTWAVE_CODE="$DEBLUR_ROOT/shiftwave_500g_code_v1"
-SHIFTWAVE_RUN="$DEBLUR_ROOT/runs/shiftwave_500g_2gpu_v1"
+SHIFTWAVE_CODE="$DEBLUR_ROOT/shiftwave_500g_equal_code_v2"
+SHIFTWAVE_RUN="$DEBLUR_ROOT/runs/shiftwave_500g_equal_2gpu_v2"
 if [ ! -e "$SHIFTWAVE_CODE" ]; then
     git clone --branch agent/shiftnet-waveshift-pagf-500g-v1 --single-branch \
         https://github.com/hihiok/video_motion_deblur.git "$SHIFTWAVE_CODE"
@@ -116,8 +131,8 @@ DVD如只有5/10个test序列，可继续已授权训练并评测现有序列，
 |---|---|
 | 输入 | 连续13帧，所有帧与GT共用一个256×256随机crop，不resize |
 | 监督 | 中间11帧；预测与GT同尺寸 |
-| 数据 | GoPro4 / DVD2 / BSD2，每个全局batch共8 clips |
-| 双卡 | 每卡microbatch1，各累积4次；DDP2进程，FP16 GradScaler |
+| 数据 | GoPro2 / DVD2 / BSD2，每个全局batch共6 clips，严格1:1:1 |
+| 双卡 | 每卡microbatch1，各累积3次；DDP2进程，FP16 GradScaler |
 | 初始化 | 官方Ours-s预训练权重中的所有保留张量，严格shape加载 |
 | Teacher | 同一个官方Ours-s，全尺寸256 crop、同一13帧输入，取中间11帧；eval/no_grad |
 | 学生loss | L1(GT) + 0.05×Haar高频L1(GT) + λ×L1(teacher output) |

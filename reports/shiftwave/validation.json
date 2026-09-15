@@ -5,5 +5,6 @@
   "bash_syntax": "PASS",
   "true_two_rank_ddp": "NOT_RUN_SUCCESSFULLY: Gloo transport blocked by local socket policy (Operation not permitted)",
   "gpu_nccl_amp_1080p": "NOT_RUN: automatic required server preflight",
-  "training_and_psnr": "NOT_RUN; 33dB is an acceptance target, not a result"
+  "training_and_psnr": "NOT_RUN; 33dB is an acceptance target, not a result",
+  "equal_sampling_v2": "3 passed: equal 2/2/2 each update and 1/1/1 each rank; no duplicate windows within domain epoch and deterministic resume; checkpoint migration preserves model/optimizer/scaler/update and original file"
 }

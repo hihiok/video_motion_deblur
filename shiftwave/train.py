@@ -14,7 +14,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from shift500.data import Clips, DOMAINS, load_training_clip, sha256
+from shift500.data import DOMAINS, load_training_clip, sha256
+from .data import Clips
 from .protocol import validate_training_settings, training_targets, learning_rate, distillation_weight
 from .losses import loss_terms
 from .model import ShiftWave, initialize_pretrained
