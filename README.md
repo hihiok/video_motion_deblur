@@ -1,3 +1,5 @@
+本分支任务入口：[ShiftWave 500G，双卡训练](docs/CODEAGENT_SHIFTWAVE_500G_2GPU_V1.md)。仅执行新入口；以下继承内容属于其他任务，不启动旧quality/compact或4/8卡流程。
+
 # Video Motion Deblur — Four-Model Business Stream Benchmark
 
 Shift500 当前加卡续训入口：[4/8卡实测选型并恢复现有checkpoint](docs/CODEAGENT_SHIFT500_SCALEOUT_RESUME.md)。

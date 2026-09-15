@@ -1,0 +1,9 @@
+{
+  "cpu_tests": "14 passed (6 new model/evaluation tests + 8 shared recipe/split regression tests)",
+  "torch_environment": "CPU-only test environment; GPU target remains PyTorch 2.2.2 / CUDA 11.8",
+  "python_39_syntax": "PASS",
+  "bash_syntax": "PASS",
+  "true_two_rank_ddp": "NOT_RUN_SUCCESSFULLY: Gloo transport blocked by local socket policy (Operation not permitted)",
+  "gpu_nccl_amp_1080p": "NOT_RUN: automatic required server preflight",
+  "training_and_psnr": "NOT_RUN; 33dB is an acceptance target, not a result"
+}
