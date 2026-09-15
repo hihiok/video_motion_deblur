@@ -1,6 +1,8 @@
 # Video Motion Deblur — Four-Model Business Stream Benchmark
 
-Shift500 当前训练入口：[按官方 Ours-s 实际配方执行 V3](docs/CODEAGENT_SHIFT500_OFFICIAL_RECIPE_V3.md)，13 帧 / crop256 / L1 / 300k / 全局 batch8，GoPro+DVD+BSD。旧 V1/V2 任务已替代。
+Shift500 当前加卡续训入口：[4/8卡实测选型并恢复现有checkpoint](docs/CODEAGENT_SHIFT500_SCALEOUT_RESUME.md)。
+
+Shift500 初始训练入口：[按官方 Ours-s 实际配方执行 V3](docs/CODEAGENT_SHIFT500_OFFICIAL_RECIPE_V3.md)，13 帧 / crop256 / L1 / 300k / 全局 batch8，GoPro+DVD+BSD。旧 V1/V2 任务已替代。
 
 Unified inference wrappers for comparing the following official video-deblurring models on the same business video:
 

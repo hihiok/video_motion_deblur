@@ -1,3 +1,5 @@
+> **2026-09-15加卡续训：当前已有checkpoint时请优先执行 [CODEAGENT_SHIFT500_SCALEOUT_RESUME.md](CODEAGENT_SHIFT500_SCALEOUT_RESUME.md)。原2卡上限已替代，保持V3配置接续训练，不重新初始化。**
+
 # CodeAgent：压缩 Shift-Net-s，按官方实际训练配方执行 V3
 
 ## 授权、优先级与目标

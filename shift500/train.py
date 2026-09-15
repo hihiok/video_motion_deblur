@@ -1,4 +1,4 @@
-"""One/two-GPU upstream-recipe mixed-domain training with resumable atomic checkpoints."""
+"""Resumable 1/2/4/8-GPU upstream-recipe mixed-domain training with resumable atomic checkpoints."""
 import argparse
 from datetime import timedelta
 from contextlib import nullcontext
@@ -18,6 +18,7 @@ from .data import Clips, DOMAINS, load_training_clip, sha256
 from .protocol import validate_training_settings, training_targets, learning_rate
 from .losses import loss_terms
 from .model import ShiftModel
+from .runtime import accumulation, rank_indices
 
 STOP=False
 
@@ -42,13 +43,24 @@ def train(a):
         raise ValueError('Input provenance changed')
     rank=int(os.environ.get('RANK',0));world=int(os.environ.get('WORLD_SIZE',1))
     local=int(os.environ.get('LOCAL_RANK',0))
-    if world not in (1,2):raise ValueError('Use one or two GPUs per model')
+    accum=accumulation(c['clips_per_update'],world)
+    benchmarking=bool(a.benchmark_report)
+    if benchmarking and (a.preflight or a.stop_after or not a.resume):
+        raise ValueError('Benchmark requires explicit --resume and cannot combine with preflight/stop-after')
+    if a.benchmark_warmup<0 or a.benchmark_steps<1:raise ValueError('Invalid benchmark lengths')
+    if benchmarking and Path(a.benchmark_report).exists():raise FileExistsError(a.benchmark_report)
+    workers=c['workers'] if a.workers is None else a.workers
+    if workers<0 or a.prefetch_factor<1:raise ValueError('Invalid loader execution controls')
+    execution=dict(world_size=world,activation_checkpointing=a.activation_checkpointing,
+                   workers_per_rank=workers,prefetch_factor=a.prefetch_factor,global_batch=c['clips_per_update'],
+                   accumulation_per_rank=accum)
     torch.set_num_threads(2);torch.cuda.set_device(local);device=torch.device('cuda',local)
     if world>1:dist.init_process_group('nccl',timeout=timedelta(hours=4))
     random.seed(c['seed']);np.random.seed(c['seed']);torch.manual_seed(c['seed']);torch.cuda.manual_seed_all(c['seed'])
     manifest=json.loads(Path(c['manifest']).read_text())
-    out=Path(c['output'])/a.variant;out.mkdir(parents=True,exist_ok=True)
-    model=ShiftModel(c['upstream'],a.variant,activation_checkpointing=True,training_context=c['training_context']).to(device)
+    out=Path(c['output'])/a.variant
+    if not benchmarking:out.mkdir(parents=True,exist_ok=True)
+    model=ShiftModel(c['upstream'],a.variant,activation_checkpointing=a.activation_checkpointing=='on',training_context=c['training_context']).to(device)
     transfer={'method':'random','seed':c['seed'],'teacher_weights_loaded':False}
     opt=torch.optim.AdamW(model.parameters(),lr=c['lr'],betas=(.9,.99),weight_decay=0)
     scaler=torch.cuda.amp.GradScaler()
@@ -62,7 +74,8 @@ def train(a):
         start=state['update'];amp_skipped_total=state['amp_skipped_total']
     elif a.resume and not a.preflight:
         raise FileNotFoundError(a.resume)
-    if rank==0:(out/'initialization.json').write_text(json.dumps(transfer,indent=2)+'\n')
+    if rank==0 and not benchmarking and not start:(out/'initialization.json').write_text(json.dumps(transfer,indent=2)+'\n')
+    initial_amp_skipped=amp_skipped_total
     total=c['total_updates']
     if a.preflight:
         if world!=1:raise ValueError('Preflight is single GPU; later DDP uses same per-GPU microbatch')
@@ -121,26 +134,39 @@ def train(a):
         raise ValueError('Run this variant preflight first')
     if world>1:model=DDP(model,device_ids=[local],broadcast_buffers=False)
     raw=model.module if world>1 else model
-    accum=c['clips_per_update']//world
     end=total if not a.stop_after else min(total,start+a.stop_after)
-    indices=range(start*c['clips_per_update']+rank,end*c['clips_per_update'],world)
+    if benchmarking:
+        end=min(total,start+a.benchmark_warmup+a.benchmark_steps)
+        if end-start<=a.benchmark_warmup:raise ValueError('Insufficient remaining iterations for benchmark')
+    indices=rank_indices(start,end,rank,world,c['clips_per_update'])
     dataset=Clips(manifest,total*c['clips_per_update'],c['frames'],c['seed'],crop_size=c['crop_size'],
                   n_frames_per_video=c['n_frames_per_video'])
-    loader=iter(DataLoader(dataset,batch_size=1,sampler=indices,num_workers=c['workers'],pin_memory=True,
-                           worker_init_fn=worker_init,**({'prefetch_factor':1} if c['workers'] else {})))
+    loader=iter(DataLoader(dataset,batch_size=1,sampler=indices,num_workers=workers,pin_memory=True,
+                           worker_init_fn=worker_init,**({'prefetch_factor':a.prefetch_factor} if workers else {})))
     signal.signal(signal.SIGTERM,request_stop);signal.signal(signal.SIGINT,request_stop)
-    began=time.monotonic()
+    began=time.monotonic();last_log_time=began;last_log_update=start
+    measurement_start=None;measurement_wall=None;data_wait=0.;measurement_initial_skips=initial_amp_skipped
+    if rank==0 and not benchmarking:
+        (out/'runtime.json').write_text(json.dumps(dict(execution,start_update=start,
+            resumed_from=str(resume) if start else None),indent=2)+'\n')
+        print(json.dumps({'execution':execution,'resume_update':start,'amp_skipped_total':amp_skipped_total}),flush=True)
     def save(update,filename='latest.pth'):
-        if rank==0:
+        if rank==0 and not benchmarking:
             atomic_save({'model':raw.state_dict(),'optimizer':opt.state_dict(),'update':update,
                          'scaler':scaler.state_dict(),'amp_skipped_total':amp_skipped_total,'variant':a.variant,'config':c,
-                         'git_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()},out/filename)
+                         'execution':execution,'git_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()},out/filename)
     for step in range(start,end):
+        if benchmarking and step==start+a.benchmark_warmup:
+            if world>1:dist.barrier()
+            torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
+            measurement_start=time.monotonic();measurement_wall=time.time();measurement_initial_skips=amp_skipped_total
         lr=learning_rate(step,c)
         for group in opt.param_groups:group['lr']=lr
         opt.zero_grad(set_to_none=True);meter={}
         for micro in range(accum):
-            batch=next(loader);x=batch['blur'].to(device,non_blocking=True).half();gt=training_targets(batch['gt'],c).to(device,non_blocking=True)
+            load_started=time.monotonic();batch=next(loader)
+            if measurement_start is not None:data_wait+=time.monotonic()-load_started
+            x=batch['blur'].to(device,non_blocking=True).half();gt=training_targets(batch['gt'],c).to(device,non_blocking=True)
             sync=model.no_sync() if world>1 and micro<accum-1 else nullcontext()
             with sync:
                 with torch.autocast('cuda',dtype=torch.float16):
@@ -149,7 +175,7 @@ def train(a):
                 if world>1:dist.all_reduce(finite,op=dist.ReduceOp.MIN)
                 if not finite.item():raise RuntimeError('NONFINITE_LOSS; resume last valid checkpoint')
                 scaler.scale(loss/accum).backward()
-            for k,v in terms.items():meter[k]=meter.get(k,0.)+v.item()/accum
+            for k,v in terms.items():meter[k]=meter.get(k,0.)+v/accum
             del x,gt,pred,loss,terms,batch
         scaler.unscale_(opt)
         norm=torch.nn.utils.clip_grad_norm_(model.parameters(),c['grad_clip'])
@@ -160,15 +186,19 @@ def train(a):
         amp_skipped_total+=int(amp_skipped)
         if update%20==0 or update==start+1:
             if world>1:
-                values=torch.tensor(list(meter.values()),device=device)
+                values=torch.stack(list(meter.values()))
                 dist.all_reduce(values);values/=world
                 meter=dict(zip(meter,values.tolist()))
+            else:meter={k:v.item() for k,v in meter.items()}
         if rank==0 and (update%20==0 or update==start+1):
             row=dict(update=update,total=total,lr=lr,grad_norm=norm.item() if torch.isfinite(norm) else None,
                      amp_scale=scaler.get_scale(),amp_skipped=amp_skipped,amp_skipped_total=amp_skipped_total,
-                     seconds_per_update=(time.monotonic()-began)/(update-start),**meter)
+                     seconds_per_update=(time.monotonic()-began)/(update-start),
+                     recent_seconds_per_update=(time.monotonic()-last_log_time)/(update-last_log_update),**meter)
+            last_log_time=time.monotonic();last_log_update=update
             print(json.dumps(row),flush=True)
-            with open(out/'training.jsonl','a') as f:f.write(json.dumps(row)+'\n')
+            if not benchmarking:
+                with open(out/'training.jsonl','a') as f:f.write(json.dumps(row)+'\n')
         stop=torch.tensor(int(STOP),device=device)
         if world>1:dist.all_reduce(stop,op=dist.ReduceOp.MAX)
         if update%c['save_every']==0 or update==end or stop.item():save(update)
@@ -176,6 +206,24 @@ def train(a):
             save(update)
             if world>1:dist.barrier();dist.destroy_process_group()
             raise SystemExit(75)
+    if benchmarking:
+        torch.cuda.synchronize()
+        duration=time.monotonic()-measurement_start
+        memory=torch.cuda.max_memory_allocated()
+        fraction=memory/torch.cuda.get_device_properties(device).total_memory
+        metrics=torch.tensor([duration,data_wait,memory/2**30,fraction],device=device,dtype=torch.float64)
+        if world>1:dist.all_reduce(metrics,op=dist.ReduceOp.MAX)
+        if rank==0:
+            elapsed,wait,peak,fraction=metrics.tolist()
+            report=dict(execution,status='PASS',variant=a.variant,start_update=start,end_update=end,
+                        measured_updates=end-start-a.benchmark_warmup,seconds_per_update=elapsed/(end-start-a.benchmark_warmup),
+                        measurement_start_time=measurement_wall,measurement_end_time=time.time(),
+                        max_rank_data_wait_fraction=wait/elapsed,peak_GiB=peak,peak_memory_fraction=fraction,
+                        amp_skipped_during_trial=amp_skipped_total-initial_amp_skipped,
+                        amp_skipped_measured=amp_skipped_total-measurement_initial_skips,
+                        source_checkpoint=str(resume),config_sha256=sha256(a.config))
+            target=Path(a.benchmark_report);target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_text(json.dumps(report,indent=2)+'\n')
     if world>1:dist.barrier();dist.destroy_process_group()
     if STOP:raise SystemExit(75)
 
@@ -185,6 +233,12 @@ def main():
     p.add_argument('--variant',choices=['quality','compact'],required=True)
     p.add_argument('--preflight',action='store_true');p.add_argument('--resume')
     p.add_argument('--stop-after',type=int,help='Optional bounded run; does not alter schedule')
+    p.add_argument('--activation-checkpointing',choices=['on','off'],default='on')
+    p.add_argument('--workers',type=int,help='Execution-only workers per rank; config stays unchanged')
+    p.add_argument('--prefetch-factor',type=int,default=2)
+    p.add_argument('--benchmark-report',help='Disposable trial: write only this report, never production logs/checkpoints')
+    p.add_argument('--benchmark-warmup',type=int,default=20)
+    p.add_argument('--benchmark-steps',type=int,default=80)
     train(p.parse_args())
 
 if __name__=='__main__':main()
