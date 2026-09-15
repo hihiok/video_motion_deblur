@@ -1,8 +1,8 @@
 # DSTNet+ Base → WaveShift 压缩版：双卡执行任务 V1
 
-2026-09-15 更新：按用户最新要求，全部100k更新都混合GoPro/DVD/BSD；取消最后20k仅GoPro采样。
-使用本次新commit，不继续沿用旧commit `e54bc164de08d9d9ab788f382787aa7078db6287` 启动新任务。
-若旧RUN已生成config或checkpoint，不覆盖它们；尚未开训时可使用新的 `RUN=$ROOT/runs/dstplus_waveshift_500g_all3_v2`。
+2026-09-15 更新：按用户最新要求，全部100k更新都按GoPro/DVD/BSD **1:1:1均衡采样**；取消GoPro占75%及仅GoPro阶段。
+使用本次新commit，不继续沿用旧commit `e54bc164de08d9d9ab788f382787aa7078db6287` 或 `7a565b38e3f763b2f3b5e0275a7982af2758e6e5` 启动新任务。
+若旧RUN已生成config或checkpoint，不覆盖它们；尚未开训时可使用新的 `RUN=$ROOT/runs/dstplus_waveshift_500g_equal3_v3`。
 若旧任务已在训练，先回传当前update、config和checkpoint位置以便作者提供保留优化器状态的迁移，禁止重复启动或擅自从零重训。
 
 ## 1. 目标与执行边界
@@ -148,8 +148,10 @@ shift/reshape/数据搬运不计浮点运算，但其内存带宽开销不为零
 - 两卡DDP，每卡 microbatch=1，累积4次，全局每次参数更新8个clips。
 - 每个clip为6张连续原生整帧；所有6张计算loss。**不crop、不resize、不空间tile。**
 - 总100,000次参数更新。这是本次压缩配方预算，不是官方600k配方复现，也不是33dB保证。
-- 前80k：每8个clips按GoPro6/DVD1/BSD1，原版GoPro Base冻结在线蒸馏。
-- 后20k：同一个模型仍按GoPro6/DVD1/BSD1混合精修，仅关闭蒸馏；三个数据集全程参与训练。
+- 前80k：GoPro/DVD/BSD按1:1:1均衡采样，原版GoPro Base冻结在线蒸馏。
+- 后20k：同一个模型仍按1:1:1混合精修，仅关闭蒸馏；三个数据集全程参与训练。
+- 全局batch=8不能被3整除，因此连续三次更新按GoPro/DVD/BSD分别分配(3,3,2)、(3,2,3)、(2,3,3)个clips。每连续三次更新每个数据集恰好8个clips；不会把某张GPU固定给某个数据集。
+- 全100k更新共有800,000个clips，GoPro266,667 / DVD266,667 / BSD266,666，差异仅来自末尾余数。每个clip都是6帧，单clip损失对像素取均值后等权累积，因此不会因原生尺寸不同而按像素数放大某个数据集的权重。
 - 监督loss：Charbonnier + 0.01×空间梯度L1；蒸馏0.2×RGB L1，仅在teacher逐像素比student更接近GT处作用，避免跨域错误强制传递。
 - BF16 AMP，梯度checkpoint、梯度裁剪1.0，AdamW。
 - 学习率前80k从1e-4余弦衰减至1e-6，前500次warmup；后20k从2e-5衰减至1e-6。

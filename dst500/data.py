@@ -6,7 +6,8 @@ from pathlib import Path
 from shift500.data import discover, sha256, load_indices, load_training_clip
 
 DOMAINS=('gopro','dvd','bsd')
-CYCLE=('gopro','gopro','gopro','gopro','gopro','gopro','dvd','bsd')
+CYCLE=('gopro','dvd','bsd')
+SAMPLING_RECIPE='GoPro / DVD / BSD3ms24ms = 1:1:1 throughout all 100000 updates; exact balance every 3 updates'
 GOPRO_TEST={'GOPR0384_11_00','GOPR0384_11_05','GOPR0385_11_01','GOPR0396_11_00',
             'GOPR0410_11_00','GOPR0854_11_00','GOPR0862_11_00','GOPR0868_11_00',
             'GOPR0869_11_00','GOPR0871_11_00','GOPR0881_11_01'}
@@ -54,7 +55,7 @@ def build_manifest(roots, frames=6):
 
 def sample(manifest, update, micro, rank):
     index=update*8+micro*2+rank
-    domain=CYCLE[index%8]
+    domain=CYCLE[index%len(CYCLE)]
     records=[r for r in manifest['train'] if r['domain']==domain]
     rng=random.Random(20260915+index*9176)
     # Weight by valid windows, not number of sequences.

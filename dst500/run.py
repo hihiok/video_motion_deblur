@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from .data import DOMAINS, sample, load_indices, sha256
+from .data import DOMAINS, SAMPLING_RECIPE, sample, load_indices, sha256
 from .evaluate import evaluate, save_report
 from .model import ARCHITECTURE, UPSTREAM_COMMIT, Student, teacher, initialize
 from .profile import profile
@@ -25,8 +25,8 @@ def git_head(path):
 def verify_config(c):
     if c['architecture']!=ARCHITECTURE or c['world_size']!=2 or c['accumulate']!=4 or c['frames']!=6:
         raise ValueError('Recipe mismatch; no automatic architecture/batch/T changes')
-    if c.get('train_mix')!='GoPro6 / DVD1 / BSD3ms24ms1 throughout all 100000 updates':
-        raise ValueError('Old sampling config: all updates must use all three datasets; preserve old run for migration')
+    if c.get('train_mix')!=SAMPLING_RECIPE:
+        raise ValueError('Old sampling config: balanced 1:1:1 sampling is required; preserve old run for migration')
     if sha256(c['manifest'])!=c['manifest_sha256']: raise ValueError('Manifest changed')
     if sha256(c['teacher_checkpoint'])!=c['teacher_sha256']: raise ValueError('Teacher changed')
     if git_head(c['upstream'])!=UPSTREAM_COMMIT: raise ValueError('Upstream commit changed')
@@ -47,7 +47,7 @@ def configure(args):
        'total_updates':100000,'distill_updates':80000,'validate_every':5000,'save_every':1000,
        'lr':.0001,'min_lr':.000001,'seed':20260915,'precision':'BF16_AMP',
        'crop_size':0,'resize':False,'spatial_tiling':False,
-       'train_mix':'GoPro6 / DVD1 / BSD3ms24ms1 throughout all 100000 updates',
+       'train_mix':SAMPLING_RECIPE,
        'target':'full GoPro test1111 RGB8 PSNR >=33; <=500 GFLOPs/native1080p output',
        'output':str(Path(args.output).resolve())}
     manifest=verify_config(c)
