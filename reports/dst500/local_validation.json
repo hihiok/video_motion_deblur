@@ -1,0 +1,25 @@
+{
+  "status": "CPU_AND_STATIC_CHECKS_PASS_GPU_VALIDATION_PENDING",
+  "torch": "2.14.0+cpu",
+  "unit_tests_passed": 5,
+  "coverage": [
+    "Haar roundtrip",
+    "all trainable parameters have finite gradients",
+    "SVD initialization of 52 dense convolutions",
+    "deploy fusion and checkpoint roundtrip",
+    "odd and minimum spatial sizes",
+    "known RGB8 PSNR",
+    "native paired augmentation",
+    "complete 1080p dispatcher operation accounting"
+  ],
+  "deploy_max_abs_observed": 1.1920928955078125e-07,
+  "student_gflops_per_output_1080p": 485.98699008,
+  "student_deployed_trainable_parameters": 602502,
+  "teacher_gflops_per_output_1080p": 2835.37910784,
+  "two_process_cpu_ddp": "BLOCKED: Gloo transport TCP device returned Operation not permitted in this runtime",
+  "cuda_preflight": "NOT_RUN; required on two server GPUs",
+  "trained_gopro_psnr": "NOT_MEASURED",
+  "target_33db_achieved": false,
+  "reference_wave_commit": "463c3dd3bd80a4048b77b25811b6b154a08b530f",
+  "upstream_dstplus_commit": "54363c15d8b924aa1ae56b8f835c1f0289954e95"
+}

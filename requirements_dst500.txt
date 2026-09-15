@@ -1,0 +1,4 @@
+# Reuse deblur_runtime (torch 2.2.2+cu118 or 2.4.x); never upgrade an active env.
+einops==0.8.1
+numpy>=1.24,<2
+Pillow>=9.5
